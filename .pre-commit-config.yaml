@@ -1,0 +1,160 @@
+---
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2025 The Linux Foundation
+
+ci:
+  autofix_prs: false
+  # pre-commit.ci sandbox prevents network calls; disable gha-workflow-linter
+  skip: [gha-workflow-linter]
+  autofix_commit_msg: |
+    Chore: pre-commit autofixes
+
+    Signed-off-by: pre-commit-ci[bot] <pre-commit-ci@users.noreply.github.com>
+  autoupdate_commit_msg: |
+    Chore: pre-commit autoupdate
+
+    Signed-off-by: pre-commit-ci[bot] <pre-commit-ci@users.noreply.github.com>
+
+exclude: "^docs/conf.py"
+
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: 3e8a8703264a2f4a69428a0aa4dcb512790b2c8c  # frozen: v6.0.0
+    hooks:
+      - id: trailing-whitespace
+      - id: check-added-large-files
+      - id: check-ast
+      - id: check-json
+      - id: check-merge-conflict
+      - id: check-xml
+      - id: check-yaml
+      - id: debug-statements
+      - id: end-of-file-fixer
+      - id: requirements-txt-fixer
+      - id: mixed-line-ending
+        args: ["--fix=lf"]
+      - id: no-commit-to-branch
+        args:
+          - --branch=dev
+          - --branch=master
+          - --branch=main
+          - --branch=rc
+          - --branch=production
+
+  - repo: https://github.com/jorisroovers/gitlint
+    rev: acc9d9de6369b76d22cb4167029d2035e8730b98 # frozen: v0.19.1
+    hooks:
+      - id: gitlint
+
+  - repo: https://github.com/adrienverge/yamllint.git
+    rev: cba56bcde1fdd01c1deb3f945e69764c291a6530  # frozen: v1.38.0
+    hooks:
+      - id: yamllint
+        types: [yaml]
+
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: f12be1ebaa5351c1fc76472de98db2c3446c8253  # frozen: v0.16.10
+    hooks:
+      - id: ruff
+        args: [--fix, --exit-non-zero-on-fix]
+      - id: ruff-format
+
+  - repo: https://github.com/pre-commit/mirrors-mypy
+    rev: 2834ec6639549dd6796205c8f011dedcd587288b  # frozen: v2.4.0
+    hooks:
+      - id: mypy
+
+  - repo: https://github.com/btford/write-good
+    rev: ab66ce10136dfad5146e69e70f82a3efac8842c1 # frozen: v1.0.8
+    hooks:
+      - id: write-good
+        files: "\\.(rst|md|markdown|mdown|mkdn)$"
+
+  - repo: https://github.com/shellcheck-py/shellcheck-py
+    rev: a6564f5d57444e123433a5c9af733e3975c77229  # frozen: v0.11.0.1-1
+    hooks:
+      - id: shellcheck
+
+  - repo: https://github.com/igorshubovych/markdownlint-cli
+    rev: 5b5dddc4fb0f83c3ea1fc5616fa63e115dce83e0  # frozen: v0.49.1
+    hooks:
+      - id: markdownlint
+        args: ["--fix"]
+
+  - repo: https://github.com/fsfe/reuse-tool
+    rev: 9fabf9eb815a57aac116b435e8346c200cdb8604  # frozen: v6.2.0
+    hooks:
+      - id: reuse
+
+  # Replaces: https://github.com/rhysd/actionlint
+  # Permits actionlint to run both locally and with precommit.ci/GitHub
+  - repo: https://github.com/Mateusz-Grzelinski/actionlint-py
+    rev: 357f7eec6dec49bf7693dc0dbec30212226d5492  # frozen: v1.7.12.25
+    hooks:
+      - id: actionlint
+        # Upstream scopes this to '^.github/workflows/'. Widened to add
+        # the examples/ callers, which are real workflow files that
+        # consumers copy verbatim and so earn the same linting as the
+        # workflows they call. The upstream scope is preserved verbatim
+        # as the first alternative.
+        files: ^\.github/workflows/|^examples/.+\.ya?ml$
+
+  # Static analysis for GitHub Actions security issues. Scoped to cover
+  # examples/ as well as the upstream hook's own paths: a zizmor
+  # *directory* scan collects only .github/workflows and
+  # .github/dependabot.yml, so passing explicit paths (which pre-commit
+  # does) is the only way to audit the examples. See .github/zizmor.yml
+  # for the one ignore this requires.
+  - repo: https://github.com/zizmorcore/zizmor-pre-commit
+    rev: fa412071e4f5d44d44f9e365f4676f9df92456a2  # frozen: v1.30.1
+    hooks:
+      - id: zizmor
+        # Upstream pattern kept intact as the leading alternatives, so
+        # .github/dependabot.yml and any action.yaml keep their
+        # coverage; only the examples/ alternative is new.
+        # yamllint disable-line rule:line-length
+        files: (\.github/(workflows/.*|dependabot\.ya?ml))|(action\.ya?ml)$|^examples/.+\.ya?ml$
+        # zizmor decides between offline and online audits by probing
+        # for GH_TOKEN/GITHUB_TOKEN/ZIZMOR_GITHUB_TOKEN, so a developer
+        # who exports one would silently run a different audit set from
+        # tokenless CI. Pin the mode so the hook is deterministic
+        # everywhere. '--no-progress' repeats the upstream default,
+        # which supplying 'args' would otherwise replace.
+        args: ['--no-progress', '--offline']
+
+  # Check for misspellings in documentation files
+  - repo: https://github.com/codespell-project/codespell
+    rev: 57b21406f092110c18776e39b0bda50d37c945c8  # frozen: v2.4.3
+    hooks:
+      - id: codespell
+
+  # Requires a mirror, primary repo lacks .pre-commit-hooks.yaml
+  - repo: https://github.com/DetachHead/basedpyright-prek-mirror
+    rev: a11caebebdbf797e1e96611123db279b334a7675  # frozen: 1.40.2
+    hooks:
+      - id: basedpyright
+
+  - repo: https://github.com/lfreleng-actions/gha-workflow-linter
+    rev: b23b60e5884e985320a030e6114032152e2373cd  # frozen: v1.7.1
+    hooks:
+      - id: gha-workflow-linter
+
+  - repo: https://github.com/python-jsonschema/check-jsonschema
+    rev: 4f85d46a92dc17713078e5de73f8a13190edf6fc  # frozen: 0.38.2
+    hooks:
+      - id: check-github-actions
+      - id: check-github-workflows
+      # Same schema, applied to the example callers, which live outside
+      # the hook's default .github/workflows scope.
+      - id: check-github-workflows
+        name: Validate GitHub Workflows (examples)
+        files: ^examples/.+\.ya?ml$
+      - id: check-jsonschema
+        name: Check GitHub Workflows set timeout-minutes
+        args:
+          - --builtin-schema
+          - github-workflows-require-timeout
+        files: ^(\.github/workflows/[^/]+|examples/.+)\.ya?ml$
+        types:
+          - yaml
+      - id: check-readthedocs

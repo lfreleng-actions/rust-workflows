@@ -1,0 +1,917 @@
+---
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Linux Foundation
+
+# Reusable build/test/release pipeline SKELETON (Model A: tag-driven).
+#
+# Reproduces the canonical Linux Foundation release pipeline shape. The
+# repository-metadata job runs in parallel as an informational step.
+# After build the audit jobs in { } run in parallel; the tests then gate
+# on ALL of them (gating inversion: on releases the audits gate the
+# expensive test matrix), and publishing runs at the end:
+#   tag-validate -> build -> { audit | sbom -> grype } -> tests
+#     -> attach-artefacts -> promote-release
+#
+# Steps marked "# TEMPLATE:" are placeholders. When instantiating this
+# template for a language, replace them with the real build/test/audit/
+# SBOM actions; the tag validation, release plumbing, harden-runner
+# wiring, dual checkout and Grype scan are generic and transfer as-is.
+#
+# Call this from a thin caller workflow on a tag push; see
+# examples/build-test-release/ for both a plain GitHub-native caller and
+# a Gerrit-wrapped caller.
+name: '[R] Build/Test/Release (Template)'
+
+# yamllint disable-line rule:truthy
+on:
+  workflow_call:
+    inputs:
+      # --- Checkout target (defaults to the calling repository) ---
+      repository:
+        description: 'Repository to check out (owner/name)'
+        required: false
+        type: string
+        default: ''
+      ref:
+        description: 'Branch/tag/SHA to check out (empty = default branch)'
+        required: false
+        type: string
+        default: ''
+
+      # --- Project layout ---
+      path_prefix:
+        description: 'Path to the project root directory'
+        required: false
+        type: string
+        default: '.'
+
+      # --- Tests ---
+      test_permit_fail:
+        description: 'Permit test failures without failing the workflow'
+        required: false
+        type: boolean
+        default: false
+
+      # --- Audit ---
+      audit_enabled:
+        description: 'Run the dependency audit job (set false to skip)'
+        required: false
+        type: boolean
+        default: true
+      audit_permit_fail:
+        description: 'Permit dependency audit failures (the NO_BLOCK pattern)'
+        required: false
+        type: boolean
+        default: false
+
+      # --- SBOM ---
+      sbom_enabled:
+        description: >-
+          Generate an SBOM (set false to skip). The Grype job scans the
+          SBOM, so skipping generation leaves it nothing to scan and it
+          is skipped too. To keep the SBOM but drop the scan, use
+          grype_enabled instead.
+        required: false
+        type: boolean
+        default: true
+
+      # --- Grype scan ---
+      grype_enabled:
+        description: >-
+          Run the Grype vulnerability scan over the generated SBOM (set
+          false to skip). Decoupling is one-way: disabling the scan
+          keeps the SBOM, but disabling the SBOM also stops the scan,
+          which has nothing to read.
+        required: false
+        type: boolean
+        default: true
+      grype_fail_on:
+        description: 'Minimum severity that fails the Grype scan'
+        required: false
+        type: string
+        default: 'medium'
+      grype_permit_fail:
+        description: >-
+          Permit Grype findings without failing the job. When false, falls
+          back to the NO_BLOCK_AUDIT_FAIL repository variable at runtime.
+        required: false
+        type: boolean
+        default: false
+
+      # --- Runner hardening ---
+      harden_runner_egress:
+        description: "Harden-runner egress policy: 'block' or 'audit'"
+        required: false
+        type: string
+        default: 'block'
+      harden_runner_allowlist:
+        description: 'Out-of-band harden-runner allow-list configuration'
+        required: false
+        type: string
+        # yamllint disable-line rule:line-length
+        default: 'lfreleng-actions//.github/harden-runner/lfreleng-actions/allow_list.txt@f0f76ac22f342c9a788ebcabe584e68a79cc2e83'  # v0.16.0
+
+      # --- Gerrit-aware checkout (empty unless dispatched via Gerrit) ---
+      gerrit_refspec:
+        description: 'Gerrit refspec of the change under test'
+        required: false
+        type: string
+        default: ''
+      gerrit_project:
+        description: 'Gerrit project name'
+        required: false
+        type: string
+        default: ''
+      gerrit_branch:
+        description: 'Gerrit target branch'
+        required: false
+        type: string
+        default: ''
+      gerrit_url:
+        description: >-
+          Gerrit server URL. Empty falls back to the GERRIT_URL repository
+          variable at runtime.
+        required: false
+        type: string
+        default: ''
+
+      # --- Release-only inputs ---
+      attestations:
+        description: >-
+          Generate build provenance attestations. Placeholder wiring in
+          this template: pass it to your build action (or enable the
+          commented actions/attest example in the build job) when
+          instantiating. Keep it toggleable for air-gapped or
+          Gerrit-mirrored consumers that cannot reach Sigstore.
+        required: false
+        type: boolean
+        default: true
+      sigstore_sign:
+        description: >-
+          Sign build artefacts with Sigstore (keyless/OIDC). Placeholder
+          wiring in this template: pass it to your build action when
+          instantiating. Keep it toggleable for air-gapped or
+          Gerrit-mirrored consumers that cannot reach Sigstore.
+        required: false
+        type: boolean
+        default: true
+
+    outputs:
+      tag:
+        description: 'Validated release tag/version string'
+        value: ${{ jobs.tag-validate.outputs.tag }}
+
+permissions: {}
+
+# Turn off GitHub CLI telemetry for every job in this workflow. The
+# release steps shell out to 'gh', which otherwise POSTs usage events to
+# cafe.github.com. No step here needs that endpoint, and under the org
+# harden-runner egress allow-list the attempt surfaces as a blocked
+# connection, burying real findings in noise. GH_TELEMETRY takes
+# precedence over DO_NOT_TRACK, so this single variable covers both.
+env:
+  GH_TELEMETRY: 'false'
+
+jobs:
+  gerrit-validate:
+    name: 'Validate Gerrit Inputs'
+    # Fails fast with a clear message when gerrit_refspec is set without
+    # the project/branch the Gerrit checkout path also requires. The
+    # build-chain root job depends on this, so invalid Gerrit inputs stop
+    # the pipeline early and cleanly. This job always runs (only the
+    # validation step is conditional), so gating dependents on it does
+    # not trip GitHub's "skipped need skips dependents" behaviour.
+    runs-on: ubuntu-latest
+    permissions: {}
+    timeout-minutes: 2
+    steps:
+      - name: 'Require Gerrit project, branch and URL'
+        if: inputs.gerrit_refspec != ''
+        shell: bash
+        env:
+          GERRIT_PROJECT: ${{ inputs.gerrit_project }}
+          GERRIT_BRANCH: ${{ inputs.gerrit_branch }}
+          # yamllint disable-line rule:line-length
+          GERRIT_URL: ${{ inputs.gerrit_url != '' && inputs.gerrit_url || vars.GERRIT_URL }}
+        run: |
+          # gerrit_refspec is set, so the Gerrit checkout path runs and
+          # also requires gerrit_project, gerrit_branch and a resolvable
+          # Gerrit URL (the gerrit_url input or the GERRIT_URL variable).
+          missing=''
+          if [ -z "${GERRIT_PROJECT}" ]; then
+            missing="${missing} gerrit_project"
+          fi
+          if [ -z "${GERRIT_BRANCH}" ]; then
+            missing="${missing} gerrit_branch"
+          fi
+          if [ -z "${GERRIT_URL}" ]; then
+            missing="${missing} gerrit_url/GERRIT_URL"
+          fi
+          if [ -n "${missing}" ]; then
+            echo "::error::gerrit_refspec is set but missing:${missing}"
+            exit 1
+          fi
+          echo "Gerrit inputs validated ✅"
+
+  repository-metadata:
+    name: 'Repository Metadata'
+    needs: gerrit-validate
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    timeout-minutes: 5
+    steps:
+      - name: 'Load egress allow-list'
+        # yamllint disable-line rule:line-length
+        uses: lfreleng-actions/harden-runner-block-action@a32eb064a1188f6b0f15d2c0c0381efe54b0dd22  # v0.12.2
+        with:
+          config: ${{ inputs.harden_runner_allowlist }}
+      - name: 'Harden runner'
+        # yamllint disable-line rule:line-length
+        uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1  # v2.21.1
+        with:
+          # yamllint disable-line rule:line-length
+          egress-policy: ${{ inputs.harden_runner_egress == 'audit' && 'audit' || 'block' }}
+          allowed-endpoints: >
+            ${{ env.CONNECTION_ALLOW_LIST }}
+
+      - name: 'Checkout Gerrit change'
+        if: inputs.gerrit_refspec != ''
+        # yamllint disable-line rule:line-length
+        uses: lfreleng-actions/checkout-gerrit-change-action@298f53bbbc1d5f9e54df9feb484d110dc2b33197  # v1.1.0
+        with:
+          gerrit-refspec: ${{ inputs.gerrit_refspec }}
+          gerrit-project: ${{ inputs.gerrit_project }}
+          # yamllint disable-line rule:line-length
+          gerrit-url: ${{ inputs.gerrit_url != '' && inputs.gerrit_url || vars.GERRIT_URL }}
+          delay: '0s'
+          repository: ${{ inputs.repository || github.repository }}
+          ref: refs/heads/${{ inputs.gerrit_branch }}
+      - name: 'Checkout repository'
+        if: inputs.gerrit_refspec == ''
+        # yamllint disable-line rule:line-length
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: ${{ inputs.repository || github.repository }}
+          ref: ${{ inputs.ref }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: 'Gather repository metadata'
+        id: repo-metadata
+        # yamllint disable-line rule:line-length
+        uses: lfreleng-actions/repository-metadata-action@847400e0d0b34cc88a572fa9575accd80401b796  # v0.3.1
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          github_summary: 'true'
+          gerrit_summary: ${{ inputs.gerrit_refspec != '' }}
+          artifact_upload: 'true'
+          artifact_formats: 'json'
+
+  tag-validate:
+    name: 'Validate Tag Push'
+    needs: gerrit-validate
+    runs-on: 'ubuntu-latest'
+    permissions:
+      contents: write  # Needed to draft a release
+    timeout-minutes: 5
+    outputs:
+      tag: ${{ steps.tag-validate.outputs.tag_name }}
+    steps:
+      - name: 'Load egress allow-list'
+        # yamllint disable-line rule:line-length
+        uses: lfreleng-actions/harden-runner-block-action@a32eb064a1188f6b0f15d2c0c0381efe54b0dd22  # v0.12.2
+        with:
+          config: ${{ inputs.harden_runner_allowlist }}
+      - name: 'Harden runner'
+        # yamllint disable-line rule:line-length
+        uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1  # v2.21.1
+        with:
+          # yamllint disable-line rule:line-length
+          egress-policy: ${{ inputs.harden_runner_egress == 'audit' && 'audit' || 'block' }}
+          allowed-endpoints: >
+            ${{ env.CONNECTION_ALLOW_LIST }}
+
+      - name: 'Checkout Gerrit change'
+        if: inputs.gerrit_refspec != ''
+        # yamllint disable-line rule:line-length
+        uses: lfreleng-actions/checkout-gerrit-change-action@298f53bbbc1d5f9e54df9feb484d110dc2b33197  # v1.1.0
+        with:
+          gerrit-refspec: ${{ inputs.gerrit_refspec }}
+          gerrit-project: ${{ inputs.gerrit_project }}
+          # yamllint disable-line rule:line-length
+          gerrit-url: ${{ inputs.gerrit_url != '' && inputs.gerrit_url || vars.GERRIT_URL }}
+          delay: '0s'
+          repository: ${{ inputs.repository || github.repository }}
+          ref: refs/heads/${{ inputs.gerrit_branch }}
+      - name: 'Checkout repository'
+        if: inputs.gerrit_refspec == ''
+        # yamllint disable-line rule:line-length
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: ${{ inputs.repository || github.repository }}
+          ref: ${{ inputs.ref }}
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+
+      - name: 'Verify pushed tag'
+        id: 'tag-validate'
+        # yamllint disable-line rule:line-length
+        uses: lfreleng-actions/tag-validate-action@63470621b8ebc5c4fc86ebb616727dd0a7285dd9  # v1.1.7
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          require_type: 'semver'
+          reject_development: 'true'
+          require_github: 'true'
+          # yamllint disable-line rule:line-length
+          require_signed: 'ssh,gpg-unverifiable'  # Cannot verify GPG without key
+
+      - name: 'Ensure draft release exists'
+        id: 'ensure-release'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.tag-validate.outputs.tag_name }}
+        run: |
+          # Ensure draft release exists
+          # Check if release exists and get its draft status
+          if RELEASE_INFO=$(gh release view "$TAG" \
+            --json isDraft 2>/dev/null); then
+            IS_DRAFT=$(echo "$RELEASE_INFO" | jq -r '.isDraft')
+            if [ "$IS_DRAFT" = "true" ]; then
+              echo "Draft release for tag $TAG already exists"
+            else
+              echo "::error::A published release already exists for $TAG;" \
+                "delete or recreate it as a draft, then re-run."
+              exit 1
+            fi
+          else
+            echo "Creating draft release for tag $TAG"
+            gh release create "$TAG" \
+              --draft \
+              --title "Release $TAG" \
+              --notes "Automated release for $TAG"
+          fi
+
+  build:
+    name: 'Build'
+    needs: 'tag-validate'
+    runs-on: 'ubuntu-latest'
+    outputs:
+      artefact_name: ${{ steps.build.outputs.artefact_name }}
+      artefact_path: ${{ steps.build.outputs.artefact_path }}
+    permissions:
+      contents: read
+      id-token: write       # Needed for attestations
+      attestations: write   # Needed for attestations
+    timeout-minutes: 12
+    steps:
+      - name: 'Load egress allow-list'
+        # yamllint disable-line rule:line-length
+        uses: lfreleng-actions/harden-runner-block-action@a32eb064a1188f6b0f15d2c0c0381efe54b0dd22  # v0.12.2
+        with:
+          config: ${{ inputs.harden_runner_allowlist }}
+      - name: 'Harden runner'
+        # yamllint disable-line rule:line-length
+        uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1  # v2.21.1
+        with:
+          # yamllint disable-line rule:line-length
+          egress-policy: ${{ inputs.harden_runner_egress == 'audit' && 'audit' || 'block' }}
+          allowed-endpoints: >
+            ${{ env.CONNECTION_ALLOW_LIST }}
+
+      - name: 'Checkout Gerrit change'
+        if: inputs.gerrit_refspec != ''
+        # yamllint disable-line rule:line-length
+        uses: lfreleng-actions/checkout-gerrit-change-action@298f53bbbc1d5f9e54df9feb484d110dc2b33197  # v1.1.0
+        with:
+          gerrit-refspec: ${{ inputs.gerrit_refspec }}
+          gerrit-project: ${{ inputs.gerrit_project }}
+          # yamllint disable-line rule:line-length
+          gerrit-url: ${{ inputs.gerrit_url != '' && inputs.gerrit_url || vars.GERRIT_URL }}
+          delay: '0s'
+          repository: ${{ inputs.repository || github.repository }}
+          ref: refs/heads/${{ inputs.gerrit_branch }}
+      - name: 'Checkout repository'
+        if: inputs.gerrit_refspec == ''
+        # yamllint disable-line rule:line-length
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: ${{ inputs.repository || github.repository }}
+          ref: ${{ inputs.ref }}
+          persist-credentials: false
+
+      # TEMPLATE: Replace this placeholder with your language build
+      # action, passing the sigstore_sign/attestations inputs through
+      # where the action supports them, e.g.:
+      #   - name: 'Build project'
+      #     id: build
+      #     uses: lfreleng-actions/<lang>-build-action@<SHA>  # vX.Y.Z
+      #     with:
+      #       path_prefix: ${{ inputs.path_prefix }}
+      #       sigstore_sign: ${{ inputs.sigstore_sign }}
+      #       attestations: ${{ inputs.attestations }}
+      - name: 'Build project (placeholder)'
+        id: build
+        shell: bash
+        env:
+          PATH_PREFIX: ${{ inputs.path_prefix }}
+        run: |
+          # TEMPLATE: placeholder build step; produces a trivial text
+          # artefact so the artifact/release plumbing can be exercised.
+          cd "${PATH_PREFIX}"
+          mkdir -p dist
+          {
+            echo "workflows-template placeholder build artefact"
+            echo "repository: ${GITHUB_REPOSITORY}"
+            echo "ref: ${GITHUB_REF}"
+            echo "sha: ${GITHUB_SHA}"
+            echo "run_id: ${GITHUB_RUN_ID}"
+          } > dist/template-artefact.txt
+          echo "artefact_name=template-build" >> "$GITHUB_OUTPUT"
+          echo "artefact_path=${PATH_PREFIX}/dist" >> "$GITHUB_OUTPUT"
+
+      # TEMPLATE: When your build action does NOT handle attestations
+      # itself, uncomment this step to generate SLSA build provenance
+      # for real artefacts (verifiable with `gh attestation verify`).
+      # It ships commented out because attesting the trivial placeholder
+      # artefact provides no value.
+      #
+      # Use actions/attest, not actions/attest-build-provenance: as of
+      # v4 the latter is a thin wrapper that forwards its inputs to the
+      # former, and GitHub directs new implementations at actions/attest
+      # directly. With no predicate supplied it emits SLSA build
+      # provenance by default, so the step stays this short.
+      #
+      # The wrapper is not quite empty: it also sets NODE_OPTIONS to
+      # raise node's 16KB header limit, which overflows when pushing
+      # attestations to some OCI registries. Nothing below pushes to a
+      # registry, but if you add `push-to-registry: true`, carry the
+      # setting across yourself:
+      #     env:
+      #       NODE_OPTIONS: '--max-http-header-size=32768'
+      #
+      #   - name: 'Attest build provenance'
+      #     if: inputs.attestations
+      # yamllint disable-line rule:line-length
+      #     uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6  # v4.2.2
+      #     with:
+      #       subject-path: 'dist/*'
+
+      - name: 'Upload build artefact'
+        # yamllint disable-line rule:line-length
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: ${{ steps.build.outputs.artefact_name }}
+          path: ${{ steps.build.outputs.artefact_path }}
+          if-no-files-found: error
+
+  audit:
+    name: 'Audit'
+    runs-on: ubuntu-latest
+    needs: 'build'
+    # yamllint disable-line rule:line-length
+    if: ${{ !cancelled() && needs.build.result == 'success' && inputs.audit_enabled }}
+    permissions:
+      contents: read
+    timeout-minutes: 10
+    steps:
+      - name: 'Load egress allow-list'
+        # yamllint disable-line rule:line-length
+        uses: lfreleng-actions/harden-runner-block-action@a32eb064a1188f6b0f15d2c0c0381efe54b0dd22  # v0.12.2
+        with:
+          config: ${{ inputs.harden_runner_allowlist }}
+      - name: 'Harden runner'
+        # yamllint disable-line rule:line-length
+        uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1  # v2.21.1
+        with:
+          # yamllint disable-line rule:line-length
+          egress-policy: ${{ inputs.harden_runner_egress == 'audit' && 'audit' || 'block' }}
+          allowed-endpoints: >
+            ${{ env.CONNECTION_ALLOW_LIST }}
+
+      - name: 'Checkout Gerrit change'
+        if: inputs.gerrit_refspec != ''
+        # yamllint disable-line rule:line-length
+        uses: lfreleng-actions/checkout-gerrit-change-action@298f53bbbc1d5f9e54df9feb484d110dc2b33197  # v1.1.0
+        with:
+          gerrit-refspec: ${{ inputs.gerrit_refspec }}
+          gerrit-project: ${{ inputs.gerrit_project }}
+          # yamllint disable-line rule:line-length
+          gerrit-url: ${{ inputs.gerrit_url != '' && inputs.gerrit_url || vars.GERRIT_URL }}
+          delay: '0s'
+          repository: ${{ inputs.repository || github.repository }}
+          ref: refs/heads/${{ inputs.gerrit_branch }}
+      - name: 'Checkout repository'
+        if: inputs.gerrit_refspec == ''
+        # yamllint disable-line rule:line-length
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: ${{ inputs.repository || github.repository }}
+          ref: ${{ inputs.ref }}
+          persist-credentials: false
+
+      # TEMPLATE: Replace this placeholder with your language dependency
+      # audit action, e.g.:
+      #   - name: 'Audit dependencies'
+      #     uses: lfreleng-actions/<lang>-audit-action@<SHA>  # vX.Y.Z
+      #     with:
+      #       path_prefix: ${{ inputs.path_prefix }}
+      #       permit_fail: ${{ inputs.audit_permit_fail }}
+      - name: 'Audit dependencies (placeholder)'
+        shell: bash
+        env:
+          # The NO_BLOCK/soft-fail pattern: the audit_permit_fail input
+          # (or, when unset, the NO_BLOCK_AUDIT_FAIL repository
+          # variable) disables failure propagation.
+          # yamllint disable-line rule:line-length
+          NO_BLOCK: ${{ inputs.audit_permit_fail || vars.NO_BLOCK_AUDIT_FAIL == 'true' }}
+        run: |
+          # TEMPLATE: placeholder audit step; replace with real audit.
+          status=0
+          echo "Placeholder dependency audit executed"
+          if [ "${status}" != "0" ]; then
+            if [ "${NO_BLOCK}" = "true" ]; then
+              echo "::warning::Audit failed, but failures are" \
+                "permitted so the job will not fail."
+              exit 0
+            fi
+            exit "${status}"
+          fi
+
+  sbom:
+    name: 'Generate SBOM'
+    runs-on: ubuntu-latest
+    needs: 'build'
+    # yamllint disable-line rule:line-length
+    if: ${{ !cancelled() && needs.build.result == 'success' && inputs.sbom_enabled }}
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - name: 'Load egress allow-list'
+        # yamllint disable-line rule:line-length
+        uses: lfreleng-actions/harden-runner-block-action@a32eb064a1188f6b0f15d2c0c0381efe54b0dd22  # v0.12.2
+        with:
+          config: ${{ inputs.harden_runner_allowlist }}
+      - name: 'Harden runner'
+        # yamllint disable-line rule:line-length
+        uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1  # v2.21.1
+        with:
+          # yamllint disable-line rule:line-length
+          egress-policy: ${{ inputs.harden_runner_egress == 'audit' && 'audit' || 'block' }}
+          allowed-endpoints: >
+            ${{ env.CONNECTION_ALLOW_LIST }}
+
+      - name: 'Checkout Gerrit change'
+        if: inputs.gerrit_refspec != ''
+        # yamllint disable-line rule:line-length
+        uses: lfreleng-actions/checkout-gerrit-change-action@298f53bbbc1d5f9e54df9feb484d110dc2b33197  # v1.1.0
+        with:
+          gerrit-refspec: ${{ inputs.gerrit_refspec }}
+          gerrit-project: ${{ inputs.gerrit_project }}
+          # yamllint disable-line rule:line-length
+          gerrit-url: ${{ inputs.gerrit_url != '' && inputs.gerrit_url || vars.GERRIT_URL }}
+          delay: '0s'
+          repository: ${{ inputs.repository || github.repository }}
+          ref: refs/heads/${{ inputs.gerrit_branch }}
+      - name: 'Checkout repository'
+        if: inputs.gerrit_refspec == ''
+        # yamllint disable-line rule:line-length
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: ${{ inputs.repository || github.repository }}
+          ref: ${{ inputs.ref }}
+          persist-credentials: false
+
+      # TEMPLATE: Replace this placeholder with your language SBOM
+      # action. It MUST emit sbom-cyclonedx.json at the workspace root
+      # (the Grype job contract), e.g.:
+      #   - name: 'Generate SBOM'
+      #     uses: lfreleng-actions/<lang>-sbom-action@<SHA>  # vX.Y.Z
+      #     with:
+      #       path_prefix: ${{ inputs.path_prefix }}
+      # The placeholder writes a minimal VALID empty CycloneDX document
+      # so the downstream Grype scan stays fully functional.
+      - name: 'Generate SBOM (placeholder)'
+        shell: bash
+        run: |
+          # TEMPLATE: placeholder SBOM step; replace with a real SBOM
+          # generator emitting sbom-cyclonedx.json.
+          cat > sbom-cyclonedx.json <<'EOF'
+          {
+            "bomFormat": "CycloneDX",
+            "specVersion": "1.5",
+            "version": 1,
+            "components": []
+          }
+          EOF
+          echo "Wrote placeholder CycloneDX SBOM (0 components)"
+
+      - name: 'Upload SBOM artifacts'
+        # yamllint disable-line rule:line-length
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: sbom-files
+          # Glob matches whichever SBOM formats the generator produced
+          path: sbom-cyclonedx.*
+          retention-days: 45
+          # Fail fast: the downstream Grype job requires this artifact,
+          # so a missing/misnamed SBOM must surface here, not later
+          if-no-files-found: error
+
+      - name: 'SBOM summary'
+        shell: bash
+        run: |
+          # SBOM summary
+          {
+            echo "## SBOM Summary"
+            echo "Placeholder CycloneDX SBOM (0 components)"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  grype:
+    name: 'Grype Audit SBOM'
+    runs-on: ubuntu-latest
+    needs: 'sbom'
+    # yamllint disable-line rule:line-length
+    if: ${{ !cancelled() && needs.sbom.result == 'success' && inputs.grype_enabled }}
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - name: 'Load egress allow-list'
+        # yamllint disable-line rule:line-length
+        uses: lfreleng-actions/harden-runner-block-action@a32eb064a1188f6b0f15d2c0c0381efe54b0dd22  # v0.12.2
+        with:
+          config: ${{ inputs.harden_runner_allowlist }}
+      - name: 'Harden runner'
+        # yamllint disable-line rule:line-length
+        uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1  # v2.21.1
+        with:
+          # yamllint disable-line rule:line-length
+          egress-policy: ${{ inputs.harden_runner_egress == 'audit' && 'audit' || 'block' }}
+          allowed-endpoints: >
+            ${{ env.CONNECTION_ALLOW_LIST }}
+
+      - name: 'Download SBOM artefact'
+        # yamllint disable-line rule:line-length
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: sbom-files
+
+      # The grype_permit_fail input (or, when unset, the NO_BLOCK_AUDIT_FAIL
+      # repository variable) disables failure propagation so pull requests
+      # can proceed when blocked by newly discovered CVEs in transitive
+      # dependencies.
+      - name: 'Grype audit SBOM'
+        id: grype-audit
+        # yamllint disable-line rule:line-length
+        uses: lfreleng-actions/grype-scan-action@ee8d637c2324bbb84ae583abc95b56c9c4d078ee  # v0.1.0
+        with:
+          sbom: 'sbom-cyclonedx.json'
+          fail-on: ${{ inputs.grype_fail_on }}
+          # yamllint disable-line rule:line-length
+          permit-fail: ${{ inputs.grype_permit_fail || vars.NO_BLOCK_AUDIT_FAIL == 'true' }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+  tests:
+    name: 'Tests'
+    runs-on: 'ubuntu-latest'
+    # Deferred until the audit operations (audit and Grype) pass, so
+    # the expensive test suite is skipped when either audit step fails
+    # (gating inversion: audits gate tests on releases).
+    #
+    # A skipped result is accepted ONLY when a toggle explains it. A
+    # bare 'skipped' is ambiguous: grype also skips when the sbom job
+    # FAILS, and treating that as acceptable would let a release run
+    # with no scan performed at all.
+    #
+    # sbom is a direct dependency for the same reason. With
+    # grype_enabled false, a genuine SBOM failure would otherwise be
+    # invisible here: grype skips either way, and the grype clause
+    # would accept that skip on the toggle alone.
+    needs:
+      - 'build'
+      - 'audit'
+      - 'sbom'
+      - 'grype'
+    # yamllint disable-line rule:line-length
+    if: ${{ !cancelled() && needs.build.result == 'success' && (needs.audit.result == 'success' || (needs.audit.result == 'skipped' && !inputs.audit_enabled)) && (needs.sbom.result == 'success' || (needs.sbom.result == 'skipped' && !inputs.sbom_enabled)) && (needs.grype.result == 'success' || (needs.grype.result == 'skipped' && (!inputs.grype_enabled || !inputs.sbom_enabled))) }}
+    permissions:
+      contents: read
+    timeout-minutes: 12
+    steps:
+      - name: 'Load egress allow-list'
+        # yamllint disable-line rule:line-length
+        uses: lfreleng-actions/harden-runner-block-action@a32eb064a1188f6b0f15d2c0c0381efe54b0dd22  # v0.12.2
+        with:
+          config: ${{ inputs.harden_runner_allowlist }}
+      - name: 'Harden runner'
+        # yamllint disable-line rule:line-length
+        uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1  # v2.21.1
+        with:
+          # yamllint disable-line rule:line-length
+          egress-policy: ${{ inputs.harden_runner_egress == 'audit' && 'audit' || 'block' }}
+          allowed-endpoints: >
+            ${{ env.CONNECTION_ALLOW_LIST }}
+
+      - name: 'Checkout Gerrit change'
+        if: inputs.gerrit_refspec != ''
+        # yamllint disable-line rule:line-length
+        uses: lfreleng-actions/checkout-gerrit-change-action@298f53bbbc1d5f9e54df9feb484d110dc2b33197  # v1.1.0
+        with:
+          gerrit-refspec: ${{ inputs.gerrit_refspec }}
+          gerrit-project: ${{ inputs.gerrit_project }}
+          # yamllint disable-line rule:line-length
+          gerrit-url: ${{ inputs.gerrit_url != '' && inputs.gerrit_url || vars.GERRIT_URL }}
+          delay: '0s'
+          repository: ${{ inputs.repository || github.repository }}
+          ref: refs/heads/${{ inputs.gerrit_branch }}
+      - name: 'Checkout repository'
+        if: inputs.gerrit_refspec == ''
+        # yamllint disable-line rule:line-length
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: ${{ inputs.repository || github.repository }}
+          ref: ${{ inputs.ref }}
+          persist-credentials: false
+
+      # TEMPLATE: Replace this placeholder with your language test
+      # action. Pass test_permit_fail through to the action's own
+      # permit_fail input where available, e.g.:
+      #   - name: 'Run tests'
+      #     uses: lfreleng-actions/<lang>-test-action@<SHA>  # vX.Y.Z
+      #     with:
+      #       path_prefix: ${{ inputs.path_prefix }}
+      #       permit_fail: ${{ inputs.test_permit_fail }}
+      - name: 'Run tests (placeholder)'
+        shell: bash
+        env:
+          # The NO_BLOCK/soft-fail pattern: the test_permit_fail input
+          # (or, when unset, the NO_BLOCK_AUDIT_FAIL repository
+          # variable) disables failure propagation.
+          # yamllint disable-line rule:line-length
+          NO_BLOCK: ${{ inputs.test_permit_fail || vars.NO_BLOCK_AUDIT_FAIL == 'true' }}
+        run: |
+          # TEMPLATE: placeholder test step; replace with real tests.
+          status=0
+          echo "Placeholder tests executed"
+          if [ "${status}" != "0" ]; then
+            if [ "${NO_BLOCK}" = "true" ]; then
+              echo "::warning::Tests failed, but failures are" \
+                "permitted so the job will not fail."
+              exit 0
+            fi
+            exit "${status}"
+          fi
+
+  attach-artefacts:
+    name: 'Attach Artefacts to Release'
+    runs-on: 'ubuntu-latest'
+    needs:
+      - 'tag-validate'
+      - 'build'
+      - 'tests'
+    permissions:
+      contents: write  # IMPORTANT: needed to edit release, attach artefacts
+    timeout-minutes: 5
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - name: 'Load egress allow-list'
+        # yamllint disable-line rule:line-length
+        uses: lfreleng-actions/harden-runner-block-action@a32eb064a1188f6b0f15d2c0c0381efe54b0dd22  # v0.12.2
+        with:
+          config: ${{ inputs.harden_runner_allowlist }}
+      - name: 'Harden runner'
+        # yamllint disable-line rule:line-length
+        uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1  # v2.21.1
+        with:
+          # yamllint disable-line rule:line-length
+          egress-policy: ${{ inputs.harden_runner_egress == 'audit' && 'audit' || 'block' }}
+          allowed-endpoints: >
+            ${{ env.CONNECTION_ALLOW_LIST }}
+
+      - name: 'Checkout Gerrit change'
+        if: inputs.gerrit_refspec != ''
+        # yamllint disable-line rule:line-length
+        uses: lfreleng-actions/checkout-gerrit-change-action@298f53bbbc1d5f9e54df9feb484d110dc2b33197  # v1.1.0
+        with:
+          gerrit-refspec: ${{ inputs.gerrit_refspec }}
+          gerrit-project: ${{ inputs.gerrit_project }}
+          # yamllint disable-line rule:line-length
+          gerrit-url: ${{ inputs.gerrit_url != '' && inputs.gerrit_url || vars.GERRIT_URL }}
+          delay: '0s'
+          repository: ${{ inputs.repository || github.repository }}
+          ref: refs/heads/${{ inputs.gerrit_branch }}
+      - name: 'Checkout repository'
+        if: inputs.gerrit_refspec == ''
+        # yamllint disable-line rule:line-length
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: ${{ inputs.repository || github.repository }}
+          ref: ${{ inputs.ref }}
+          persist-credentials: false
+
+      - name: '⬇ Download build artefacts'
+        # yamllint disable-line rule:line-length
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: ${{ needs.build.outputs.artefact_name }}
+          path: ${{ needs.build.outputs.artefact_path }}
+
+      - name: 'Attach build artefacts to release'
+        # yamllint disable-line rule:line-length
+        uses: lfreleng-actions/release-assets-action@51e2955cf9aeab3731efd7cc4605aa2847e7d8e2  # v0.1.3
+        with:
+          asset_paths: '["${{ needs.build.outputs.artefact_path }}/**"]'
+          release_tag: ${{ needs.tag-validate.outputs.tag }}
+
+  promote-release:
+    name: 'Promote Draft Release'
+    needs:
+      - 'tag-validate'
+      - 'attach-artefacts'
+    runs-on: 'ubuntu-latest'
+    permissions:
+      contents: write  # IMPORTANT: needed for draft release promotion
+    timeout-minutes: 2
+    outputs:
+      # yamllint disable-line rule:line-length
+      release_url: ${{ steps.promote-release.outputs.release_url || steps.set-promoted-url.outputs.release_url }}
+    steps:
+      - name: 'Load egress allow-list'
+        # yamllint disable-line rule:line-length
+        uses: lfreleng-actions/harden-runner-block-action@a32eb064a1188f6b0f15d2c0c0381efe54b0dd22  # v0.12.2
+        with:
+          config: ${{ inputs.harden_runner_allowlist }}
+      - name: 'Harden runner'
+        # yamllint disable-line rule:line-length
+        uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1  # v2.21.1
+        with:
+          # yamllint disable-line rule:line-length
+          egress-policy: ${{ inputs.harden_runner_egress == 'audit' && 'audit' || 'block' }}
+          allowed-endpoints: >
+            ${{ env.CONNECTION_ALLOW_LIST }}
+
+      - name: 'Checkout Gerrit change'
+        if: inputs.gerrit_refspec != ''
+        # yamllint disable-line rule:line-length
+        uses: lfreleng-actions/checkout-gerrit-change-action@298f53bbbc1d5f9e54df9feb484d110dc2b33197  # v1.1.0
+        with:
+          gerrit-refspec: ${{ inputs.gerrit_refspec }}
+          gerrit-project: ${{ inputs.gerrit_project }}
+          # yamllint disable-line rule:line-length
+          gerrit-url: ${{ inputs.gerrit_url != '' && inputs.gerrit_url || vars.GERRIT_URL }}
+          delay: '0s'
+          repository: ${{ inputs.repository || github.repository }}
+          ref: refs/heads/${{ inputs.gerrit_branch }}
+      - name: 'Checkout repository'
+        if: inputs.gerrit_refspec == ''
+        # yamllint disable-line rule:line-length
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: ${{ inputs.repository || github.repository }}
+          ref: ${{ inputs.ref }}
+          persist-credentials: false
+
+      - name: 'Check if release is already promoted'
+        id: 'check-promoted'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.tag-validate.outputs.tag }}
+        run: |
+          # Check if release is already promoted
+          if gh release view "$TAG" --json isDraft --jq '.isDraft' \
+              2>/dev/null | grep -q "false"; then
+            echo "Release $TAG is already promoted, skipping promotion"
+            echo "already_promoted=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "Release $TAG is draft or doesn't exist, " \
+                 "proceeding with promotion"
+            echo "already_promoted=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: 'Promote draft release'
+        id: 'promote-release'
+        if: steps.check-promoted.outputs.already_promoted == 'false'
+        # yamllint disable-line rule:line-length
+        uses: lfreleng-actions/draft-release-promote-action@e420b392557c9b1eea642f0d54dec4ff39086d5f  # v0.1.5
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          tag: ${{ needs.tag-validate.outputs.tag }}
+          latest: true
+
+      - name: 'Set release URL for already promoted release'
+        id: 'set-promoted-url'
+        if: steps.check-promoted.outputs.already_promoted == 'true'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.tag-validate.outputs.tag }}
+        run: |
+          # Set release URL for already promoted release
+          RELEASE_URL=$(gh release view "$TAG" --json url --jq '.url')
+          echo "release_url=$RELEASE_URL" >> "$GITHUB_OUTPUT"
