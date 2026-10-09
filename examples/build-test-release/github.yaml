@@ -3,23 +3,32 @@
 # SPDX-FileCopyrightText: 2026 The Linux Foundation
 
 # =============================================================================
-# EXAMPLE: Plain GitHub-native caller for the build-test-release workflow
+# EXAMPLE: Plain GitHub-native caller for the Rust release lane (Model A)
 # =============================================================================
 # Copy this file into your project's .github/workflows/ directory (for
-# example as release.yaml) and adjust the `uses:` ref and the optional
-# `with:` overrides to suit your project.
+# example as build-test-release.yaml) and adjust the `uses:` ref and the
+# optional `with:` overrides to suit your project.
 #
-# This is Model A: the TAG-DRIVEN release model. The version comes from a
-# validated, signed semver tag; the reusable workflow builds, tests,
-# audits, attaches artefacts to a draft GitHub release and promotes it.
+# This is Model A: the TAG-DRIVEN release model. Push a signed tag named
+# v<crate version> on the commit that sets that version. The reusable
+# workflow validates the tag, builds, audits, tests, verifies the crates,
+# attaches them (with binaries, SBOMs, SHA256SUMS, attestations and
+# Sigstore bundles) to a draft GitHub release, publishes to crates.io when
+# publish_enabled is true, and then promotes the release.
 #
-# REGISTRY PUBLISHING MAY NEED TO LIVE HERE, CALLER-SIDE. Registry-native
-# OIDC/trusted-publishing mechanisms (e.g. PyPI trusted publishing) match
-# the OIDC job_workflow_ref claim against THIS repository, so a reusable
-# workflow cannot always act as the trusted publisher. The reusable
-# workflow exposes a `tag` output and leaves the run-scoped build
-# artefact in place, so caller-side publish jobs (stacked after the
-# `release` job below) have everything they need.
+# Make this the ONLY workflow in the project that acts on tag pushes:
+# remove the release.yaml that actions-template ships. Two workflows
+# acting on one tag push race each other.
+#
+# CRATES.IO TRUSTED PUBLISHING. crates.io matches the OIDC workflow_ref
+# claim, which names THIS file, so publishing happens inside the reusable
+# workflow. Before setting publish_enabled:
+#   1. Create the publish environment (default 'production') with a
+#      deployment tag rule such as 'v[0-9]*.[0-9]*.[0-9]*', BEFORE the
+#      first tag push: GitHub creates a missing environment without
+#      protection rules the first time a job names it.
+#   2. On crates.io, add a trusted publisher for each crate naming this
+#      repository, this workflow's filename and that environment.
 # =============================================================================
 name: 'Build/Test/Release'
 
@@ -27,49 +36,48 @@ name: 'Build/Test/Release'
 on:
   push:
     tags:
-      - '**'
+      - 'v[0-9]+.[0-9]+.[0-9]+'
 
 concurrency:
   group: "${{ github.workflow }}-${{ github.ref }}"
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 permissions: {}
-
-# Turn off GitHub CLI telemetry for any caller-side job below. Shelling
-# out to 'gh' otherwise POSTs usage events to cafe.github.com, which no
-# release step needs; under an egress allow-list the attempt surfaces as
-# a blocked connection and buries real findings in noise. This does not
-# cross the workflow_call boundary, so the reusable workflow sets the
-# same variable for its own jobs. GH_TELEMETRY takes precedence over
-# DO_NOT_TRACK, so this single variable covers both.
-env:
-  GH_TELEMETRY: 'false'
 
 jobs:
   release:
     name: 'Build/Test/Release'
     # Skip tag deletion events
     if: "!github.event.deleted"
+    # A reusable workflow cannot raise its caller's permissions. Each job
+    # inside declares its own, narrower set; only the attach and publish
+    # jobs receive id-token: write, and neither runs crate code.
     permissions:
-      contents: write       # Create the GitHub release / attach assets
-      id-token: write       # OIDC for build provenance attestations
+      contents: write       # Draft the GitHub release and attach assets
+      id-token: write       # Attestations, Sigstore, Trusted Publishing
       attestations: write   # Build provenance attestations
-    # REPLACE the pinned SHA below with a workflows-template release SHA
-    # (or your instantiated workflows repository's release SHA).
+      pull-requests: read   # repository-metadata-action queries PR data
+      issues: read          # grype-scan-action reads cve-bypass issues
+    # REPLACE the pinned SHA below with a rust-workflows release SHA.
     # The all-zero SHA is a non-functional placeholder, NOT a real commit.
     # yamllint disable-line rule:line-length
-    uses: lfreleng-actions/workflows-template/.github/workflows/build-test-release.yaml@0000000000000000000000000000000000000000  # REPLACE: vX.Y.Z
+    uses: lfreleng-actions/rust-workflows/.github/workflows/build-test-release.yaml@0000000000000000000000000000000000000000  # REPLACE: vX.Y.Z
     # All inputs are optional. Uncomment and tune only what your project
     # needs; everything else falls back to sensible defaults.
     # with:
-    #   path_prefix: '.'              # project root (monorepo subdir, etc.)
+    #   publish_enabled: true         # after registering the publisher
+    #   publish_environment: 'production'
+    #   binaries: true                # attach binaries for each runner
+    # yamllint disable-line rule:line-length
+    #   runners: '[{"runner": "ubuntu-latest", "arch": "x64"}, {"runner": "ubuntu-24.04-arm", "arch": "arm64"}]'
     #   attestations: true            # build provenance attestations
-    #   sigstore_sign: true           # Sigstore-sign build artefacts
-    #   audit_enabled: true           # false skips the dependency audit
-    #   sbom_enabled: true            # false skips SBOM generation
-    #   grype_enabled: true           # false skips the Grype scan only
-
-# Caller-side registry publish jobs go here, stacked after the release
-# job, consuming `needs.release.outputs.tag` and the run-scoped build
-# artefact. See the python-workflows release examples for a complete
-# trusted-publishing precedent.
+    #   sigstore_sign: true           # Sigstore bundles beside each asset
+    #   semver_checks: false          # cargo-semver-checks before publish
+    #   tag_enforce_increment: false  # tag must sort above earlier tags
+    #   tag_require_branch: ''        # e.g. 'main'
+    #   lockfile_required: true       # releases need Cargo.lock
+    #   test_matrix: 'msrv'           # 'project', 'msrv' or 'full'
+    #   audit_enabled: true
+    #   sbom_enabled: true            # also attaches the SBOM
+    #   grype_enabled: true
+    #   grype_fail_on: 'medium'
