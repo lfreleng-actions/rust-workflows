@@ -10,6 +10,10 @@ paths:
     ignore:
       # yamllint disable-line rule:line-length
       - 'reusable workflow call "\$/\.github/workflows/rust\-metadata\.yaml" at "uses" is not following the format'
+  .github/workflows/build-test-release.yaml:
+    ignore:
+      # yamllint disable-line rule:line-length
+      - 'reusable workflow call "\$/\.github/workflows/rust\-metadata\.yaml" at "uses" is not following the format'
   .github/workflows/testing.yaml:
     ignore:
       # GitHub's self-repository reference ('$/', July 2026) resolves
