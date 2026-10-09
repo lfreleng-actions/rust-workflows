@@ -2,12 +2,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: 2025 The Linux Foundation
 
-# Exercises the reusable workflow SKELETONS in this repository against
-# downstream fixture repositories, in parallel, to prove the generic
-# scaffolding (job graph, harden-runner wiring, dual checkout, artifact
-# plumbing, SBOM/Grype chain) functions end-to-end. The placeholder
-# build/test/audit/SBOM steps are language-agnostic, so the matrix runs
-# against fixtures of different languages by design.
+# Exercises the reusable Rust lanes in this repository against the
+# lfreleng-actions/test-rust-project fixture: its root crate and each
+# variant under variants/ (docs/BRIEF.md Q14), in parallel.
 #
 # The reusable workflows are referenced with the self-repository
 # form ('$/'), which resolves this repository at the commit already
@@ -15,12 +12,10 @@
 # this branch defines, independently of what any checkout puts in
 # the workspace.
 #
-# The build-test-release and merge skeletons are NOT self-tested here:
-# build-test-release requires a signed semver tag-push context (and
-# creates/promotes GitHub releases), and merge requires a merged-commit
-# context (and would exercise publish legs); neither is available or
-# safe on a pull request. Instantiating repos validate those through
-# their own release/merge cycles.
+# The release and merge lanes run as dry runs: they validate, build,
+# test, audit, scan and verify the crates, but draft, sign, publish and
+# tag nothing. Nobody can take a crates.io version back, so the real
+# publish path is exercised by test-rust-project's own tag releases.
 name: 'Testing 🧪'
 
 # yamllint disable-line rule:truthy
@@ -37,6 +32,11 @@ concurrency:
   cancel-in-progress: true
 
 permissions: {}
+
+# Every call below checks out test-rust-project at main after #11 and
+# #12 (df3d10b): crate 0.1.1, published by the signed tag v0.1.1 on that
+# commit, with the fixture variants. The env context is unavailable in
+# a reusable workflow call's 'with', so each call repeats the SHA.
 
 jobs:
   # Every checkout in a reusable workflow must name the repository it
@@ -56,7 +56,7 @@ jobs:
     steps:
       - name: 'Harden runner'
         # yamllint disable-line rule:line-length
-        uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1  # v2.21.1
+        uses: step-security/harden-runner@ccd8616d44fd3846e67624a50d5aad6d37bf2d25  # v2.22.1
         with:
           egress-policy: 'audit'
 
@@ -148,19 +148,300 @@ jobs:
           sys.exit(1 if failures else 0)
           GUARD
 
-  # Fixture repositories of different languages, fanned out in parallel
-  # via a matrix; the template placeholders run identically for both.
-  build-test:
-    name: 'Build/Test'
+  # The verify lane against the root crate and every fixture variant.
+  # Each entry sets every key it uses, so a missing key can never reach
+  # a boolean input as an empty string.
+  verify:
+    name: 'Verify (${{ matrix.name }})'
     strategy:
       fail-fast: false
       matrix:
-        repository:
-          - 'lfreleng-actions/test-go-project'
-          - 'lfreleng-actions/test-node-project'
+        include:
+          # Two platforms, nextest, coverage, binaries and
+          # dependency-scoped Grype gating. The fixture is pure Rust, so
+          # the CBOM job proves its wiring and its clean skip, not a
+          # scan: cbom-action has no Rust support, and its own tests
+          # cover scanning.
+          - name: 'root'
+            path_prefix: '.'
+            # yamllint disable-line rule:line-length
+            runners: '[{"runner": "ubuntu-latest", "arch": "x64"}, {"runner": "ubuntu-24.04-arm", "arch": "arm64"}]'
+            test_matrix: 'msrv'
+            test_runner: 'nextest'
+            coverage: true
+            binaries: true
+            features: ''
+            setup_script: ''
+            lockfile_required: true
+            cbom_enabled: true
+            grype_gate_when: 'dependencies-changed'
+          # A virtual workspace with a publish = false member.
+          - name: 'workspace'
+            path_prefix: 'variants/workspace'
+            runners: '[{"runner": "ubuntu-latest", "arch": "x64"}]'
+            test_matrix: 'msrv'
+            test_runner: 'cargo'
+            coverage: false
+            binaries: true
+            features: ''
+            setup_script: ''
+            lockfile_required: true
+            cbom_enabled: false
+            grype_gate_when: 'always'
+          # No committed Cargo.lock: rust-metadata resolves one and
+          # every job restores it.
+          - name: 'no-lockfile'
+            path_prefix: 'variants/no-lockfile'
+            runners: '[{"runner": "ubuntu-latest", "arch": "x64"}]'
+            test_matrix: 'project'
+            test_runner: 'cargo'
+            coverage: false
+            binaries: false
+            features: ''
+            setup_script: ''
+            lockfile_required: false
+            cbom_enabled: false
+            grype_gate_when: 'always'
+          # A pinned toolchain above the declared MSRV: the full matrix,
+          # under nextest so every leg leaves a JUnit report to check.
+          - name: 'msrv'
+            path_prefix: 'variants/msrv'
+            runners: '[{"runner": "ubuntu-latest", "arch": "x64"}]'
+            test_matrix: 'full'
+            test_runner: 'nextest'
+            coverage: false
+            binaries: false
+            features: ''
+            setup_script: ''
+            lockfile_required: true
+            cbom_enabled: false
+            grype_gate_when: 'always'
+          # A real crates.io dependency for the audit, SBOM and Grype.
+          - name: 'dependencies'
+            path_prefix: 'variants/dependencies'
+            runners: '[{"runner": "ubuntu-latest", "arch": "x64"}]'
+            test_matrix: 'project'
+            test_runner: 'cargo'
+            coverage: false
+            binaries: false
+            features: ''
+            setup_script: ''
+            lockfile_required: true
+            cbom_enabled: false
+            grype_gate_when: 'always'
+          # A native library installed by setup_script.
+          - name: 'native'
+            path_prefix: 'variants/native'
+            runners: '[{"runner": "ubuntu-latest", "arch": "x64"}]'
+            test_matrix: 'project'
+            test_runner: 'cargo'
+            coverage: false
+            binaries: false
+            features: ''
+            setup_script: 'setup.sh'
+            lockfile_required: true
+            cbom_enabled: false
+            grype_gate_when: 'always'
+          # A non-default feature selection.
+          - name: 'features'
+            path_prefix: 'variants/features'
+            runners: '[{"runner": "ubuntu-latest", "arch": "x64"}]'
+            test_matrix: 'project'
+            test_runner: 'cargo'
+            coverage: false
+            binaries: false
+            features: 'french'
+            setup_script: ''
+            lockfile_required: true
+            cbom_enabled: false
+            grype_gate_when: 'always'
     permissions:
       contents: read
       pull-requests: read  # repository-metadata-action queries PR data
+      issues: read  # grype-scan-action reads cve-bypass issues
     uses: $/.github/workflows/build-test.yaml
     with:
-      repository: ${{ matrix.repository }}
+      repository: 'lfreleng-actions/test-rust-project'
+      ref: 'df3d10b10c86d57e323f1042e246417baf684e7f'
+      path_prefix: ${{ matrix.path_prefix }}
+      runners: ${{ matrix.runners }}
+      test_matrix: ${{ matrix.test_matrix }}
+      test_runner: ${{ matrix.test_runner }}
+      coverage: ${{ matrix.coverage }}
+      binaries: ${{ matrix.binaries }}
+      features: ${{ matrix.features }}
+      setup_script: ${{ matrix.setup_script }}
+      lockfile_required: ${{ matrix.lockfile_required }}
+      cbom_enabled: ${{ matrix.cbom_enabled }}
+      grype_gate_when: ${{ matrix.grype_gate_when }}
+      artefact_suffix: -${{ matrix.name }}
+
+  # The release lane, rehearsed on the signed tag that published crate
+  # 0.1.1. A reusable workflow may not request permissions its caller
+  # lacks, and GitHub checks every job when the run starts, so this
+  # grants what the attach and publish jobs declare; dry_run skips them.
+  # Code on a branch of this repository could change the workflows it
+  # runs, and GitHub would honour these grants for it, so the dry runs
+  # run on fork pull requests, which GitHub limits to read-only
+  # tokens, and on manual runs of the default branch, and nowhere else.
+  release-dry-run:
+    name: 'Release (dry run)'
+    # yamllint disable rule:line-length
+    if: >-
+      (github.event_name == 'pull_request'
+        && github.event.pull_request.head.repo.full_name != github.repository)
+      || (github.event_name == 'workflow_dispatch'
+        && github.ref == format('refs/heads/{0}', github.event.repository.default_branch))
+    # yamllint enable rule:line-length
+    permissions:
+      contents: write  # Declared by the (skipped) attach and promote jobs
+      id-token: write  # Declared by the (skipped) attach and publish jobs
+      attestations: write  # Declared by the (skipped) attach job
+      pull-requests: read  # repository-metadata-action queries PR data
+      issues: read  # grype-scan-action reads cve-bypass issues
+    uses: $/.github/workflows/build-test-release.yaml
+    with:
+      repository: 'lfreleng-actions/test-rust-project'
+      ref: 'v0.1.1'
+      tag: 'v0.1.1'
+      dry_run: true
+      binaries: true
+      # Two platforms: the attach job then collects one artefact per
+      # platform and names each binary after its arch.
+      # yamllint disable-line rule:line-length
+      runners: '[{"runner": "ubuntu-latest", "arch": "x64"}, {"runner": "ubuntu-24.04-arm", "arch": "arm64"}]'
+      artefact_suffix: '-release'
+
+  # The merge lane on a commit that adds no release file: build, test,
+  # audit, scan and dry-run the publish. Skipped where the release dry
+  # run is, for the same reason.
+  merge-dry-run:
+    name: 'Merge (dry run)'
+    # yamllint disable rule:line-length
+    if: >-
+      (github.event_name == 'pull_request'
+        && github.event.pull_request.head.repo.full_name != github.repository)
+      || (github.event_name == 'workflow_dispatch'
+        && github.ref == format('refs/heads/{0}', github.event.repository.default_branch))
+    # yamllint enable rule:line-length
+    permissions:
+      contents: write  # Declared by the (skipped) tag job
+      id-token: write  # Declared by the (skipped) publish job
+      pull-requests: read  # repository-metadata-action queries PR data
+      issues: read  # grype-scan-action reads cve-bypass issues
+    uses: $/.github/workflows/merge.yaml
+    with:
+      repository: 'lfreleng-actions/test-rust-project'
+      ref: 'df3d10b10c86d57e323f1042e246417baf684e7f'
+      dry_run: true
+      artefact_suffix: '-merge'
+
+  # Checks what the lanes left behind, beyond their own success.
+  artefacts:
+    name: 'Check Artefacts'
+    needs:
+      - verify
+      - release-dry-run
+      - merge-dry-run
+    # The dry runs may skip (see above); a failure still stops this.
+    # yamllint disable rule:line-length
+    if: >-
+      ${{ !cancelled() && needs.verify.result == 'success'
+      && contains(fromJSON('["success", "skipped"]'), needs.release-dry-run.result)
+      && contains(fromJSON('["success", "skipped"]'), needs.merge-dry-run.result) }}
+    # yamllint enable rule:line-length
+    runs-on: ubuntu-latest
+    permissions: {}
+    timeout-minutes: 10
+    steps:
+      - name: 'Harden runner'
+        # yamllint disable-line rule:line-length
+        uses: step-security/harden-runner@ccd8616d44fd3846e67624a50d5aad6d37bf2d25  # v2.22.1
+        with:
+          egress-policy: 'audit'
+
+      - name: 'Download artefacts'
+        # yamllint disable-line rule:line-length
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8.0.2
+        with:
+          path: ${{ runner.temp }}/artefacts
+
+      - name: 'Check the artefacts'
+        shell: bash
+        env:
+          DIR: ${{ runner.temp }}/artefacts
+          RELEASE_RAN: ${{ needs.release-dry-run.result == 'success' }}
+          MERGE_RAN: ${{ needs.merge-dry-run.result == 'success' }}
+        run: |
+          # Check the artefacts
+          set -euo pipefail
+          failed=0
+          pass() { echo "✅ $1"; }
+          miss() { echo "::error::$1"; failed=1; }
+
+          if [ -f "$DIR/rust-lockfile-no-lockfile/Cargo.lock" ]; then
+            pass 'The no-lockfile variant handed on a resolved lockfile'
+          else
+            miss 'The no-lockfile variant handed on no lockfile'
+          fi
+          if [ ! -e "$DIR/rust-lockfile-dependencies" ]; then
+            pass 'A variant with a lockfile resolved none'
+          else
+            miss 'A variant with a lockfile resolved one anyway'
+          fi
+          if jq -e 'any(.components[]?; .name == "semver")' \
+            "$DIR/sbom-files-dependencies/sbom-cyclonedx.json" > /dev/null
+          then
+            pass 'The dependencies SBOM lists the semver crate'
+          else
+            miss 'The dependencies SBOM lacks the semver crate'
+          fi
+          if [ -f "$DIR/sbom-files-root/dependency-change.json" ]; then
+            pass 'The SBOM job recorded whether dependencies changed'
+          else
+            miss 'The SBOM job recorded no dependency change sidecar'
+          fi
+          if [ -f "$DIR/rust-build-x64-root/SHA256SUMS" ] \
+            && [ -f "$DIR/rust-build-arm64-root/SHA256SUMS" ]; then
+            pass 'Both platforms built the root crate binaries'
+          else
+            miss 'A platform built no root crate binaries'
+          fi
+          if [ -d "$DIR/rust-test-results-x64-1.85-msrv" ]; then
+            pass 'The msrv variant tested the declared rust-version'
+          else
+            miss 'The msrv variant left no 1.85 test results'
+          fi
+          if [ "$RELEASE_RAN" != 'true' ]; then
+            echo "::notice::The release dry run skipped on this event"
+          elif jq -e 'any(.[]; .name == "lfreleng-test-rust-project"
+              and .version == "0.1.1")' \
+            "$DIR/rust-build-x64-release/crates.json" > /dev/null; then
+            pass 'The release rehearsal packaged crate 0.1.1'
+          else
+            miss 'The release rehearsal packaged no crate 0.1.1'
+          fi
+          assets="$DIR/release-assets-release"
+          expected="$(printf '%s\n' SHA256SUMS \
+            lfreleng-test-rust-project-0.1.1.crate \
+            lfreleng-test-rust-project-arm64 \
+            lfreleng-test-rust-project-x64 \
+            sbom-cyclonedx.json sbom-cyclonedx.xml)"
+          got="$(find "$assets" -maxdepth 1 -type f -printf '%f\n' \
+            2> /dev/null | LC_ALL=C sort)"
+          if [ "$RELEASE_RAN" != 'true' ]; then
+            :
+          elif [ "$got" = "$expected" ] \
+            && (cd "$assets" && sha256sum --quiet -c SHA256SUMS); then
+            pass 'The release rehearsal collected every asset, checksummed'
+          else
+            miss "The release rehearsal collected: ${got//$'\n'/ }"
+          fi
+          if [ "$MERGE_RAN" != 'true' ]; then
+            echo "::notice::The merge dry run skipped on this event"
+          elif [ -f "$DIR/rust-build-x64-merge/crates.json" ]; then
+            pass 'The merge run packaged its snapshot crate'
+          else
+            miss 'The merge run packaged no snapshot crate'
+          fi
+          exit "$failed"
