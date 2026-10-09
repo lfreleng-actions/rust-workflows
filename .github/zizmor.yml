@@ -46,7 +46,30 @@ rules:
       # on purpose. Consumers copy these files wholesale, and an inline
       # suppression would travel with them, masking a genuine finding in
       # their repository once they replace the placeholder.
-      - gerrit.yaml:64
-      - gerrit.yaml:133
-      - github.yaml:43
-      - github.yaml:61
+      - gerrit.yaml:54
+      - gerrit.yaml:134
+      - gerrit.yaml:143
+      - github.yaml:47
+      - github.yaml:56
+      - github.yaml:64
+  stale-action-refs:
+    ignore:
+      # The same placeholder lines: an all-zero SHA points at no tag.
+      # The auditor persona reports it; the reasoning above applies.
+      - gerrit.yaml:54
+      - gerrit.yaml:134
+      - gerrit.yaml:143
+      - github.yaml:47
+      - github.yaml:56
+      - github.yaml:64
+  secrets-outside-env:
+    ignore:
+      # The Gerrit callers vote with the GERRIT_SSH_PRIVKEY secret on
+      # every patch set. An environment exists to gate a deployment;
+      # one here would add nothing a vote needs, and a reviewer gate on
+      # it would stall every verification. The key can only post
+      # reviews as the CI account. Scoped to the lines that read it.
+      - gerrit.yaml:109
+      - gerrit.yaml:116
+      - gerrit.yaml:175
+      - gerrit.yaml:179
