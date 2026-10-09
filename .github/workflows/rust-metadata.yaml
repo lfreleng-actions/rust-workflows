@@ -1,0 +1,685 @@
+---
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Linux Foundation
+
+# Shared Rust metadata job for the lanes in this repository.
+#
+# build-test.yaml, build-test-release.yaml and merge.yaml call this
+# first, through the self-repository form ('$/'), so every lane
+# resolves the toolchain, the test matrix and the lockfile the same
+# way. It is an internal building block: projects call one of the
+# three lanes, never this file.
+#
+# It runs no crate code:
+#   1. build-metadata-action reads the manifests and toolchain file.
+#   2. One exact toolchain is resolved for the whole run (BRIEF Q3). A
+#      moving channel (stable, beta, nightly) becomes the release it
+#      points at, read from the channel manifest on static.rust-lang.org,
+#      so a release landing mid-run cannot give two jobs different
+#      compilers.
+#   3. The test matrix (Q6) and the runners matrix (D4) are validated
+#      and emitted as compact JSON.
+#   4. When the project commits no Cargo.lock and the lane permits
+#      that, 'cargo generate-lockfile' resolves one and it is uploaded,
+#      so the build, audit and SBOM jobs read one dependency graph.
+#      Resolving a lockfile reads the registry index but runs no build
+#      script or proc macro.
+name: '[R] Rust Metadata'
+
+# yamllint disable-line rule:truthy
+on:
+  workflow_call:
+    inputs:
+      repository:
+        description: 'Repository to check out (owner/name)'
+        required: false
+        type: string
+        default: ''
+      ref:
+        description: 'Branch/tag/SHA to check out (empty = event ref)'
+        required: false
+        type: string
+        default: ''
+      path_prefix:
+        description: 'Directory holding the project'
+        required: false
+        type: string
+        default: '.'
+      manifest_path:
+        description: 'Cargo.toml to read, relative to path_prefix'
+        required: false
+        type: string
+        default: 'Cargo.toml'
+      workspace:
+        description: 'Publish every member less exclude, as the lane does'
+        required: false
+        type: boolean
+        default: true
+      packages:
+        description: 'Packages the lane acts on; replaces workspace'
+        required: false
+        type: string
+        default: ''
+      exclude:
+        description: 'Members the lane skips'
+        required: false
+        type: string
+        default: ''
+      toolchain:
+        description: 'Toolchain override; empty uses the toolchain file'
+        required: false
+        type: string
+        default: ''
+      test_matrix:
+        description: "Test matrix: 'project', 'msrv' or 'full'"
+        required: false
+        type: string
+        default: 'msrv'
+      runners:
+        description: 'JSON array of {runner, arch} objects'
+        required: false
+        type: string
+        default: '[{"runner": "ubuntu-latest", "arch": "x64"}]'
+      lockfile_required:
+        description: 'Fail when the project commits no Cargo.lock'
+        required: false
+        type: boolean
+        default: false
+      harden_runner_egress:
+        description: "Harden-runner egress policy: 'block' or 'audit'"
+        required: false
+        type: string
+        default: 'block'
+      harden_runner_allowlist:
+        description: 'Out-of-band harden-runner allow-list configuration'
+        required: false
+        type: string
+        # yamllint disable-line rule:line-length
+        default: 'lfreleng-actions//.github/harden-runner/lfreleng-actions/allow_list.txt@93962991c9e4cc04d77d81e619475c868a226277'  # v0.17.0
+      artefact_suffix:
+        description: 'Suffix for the lockfile artefact name'
+        required: false
+        type: string
+        default: ''
+      gerrit_refspec:
+        description: 'Gerrit refspec of the change under test'
+        required: false
+        type: string
+        default: ''
+      gerrit_project:
+        description: 'Gerrit project name'
+        required: false
+        type: string
+        default: ''
+      gerrit_branch:
+        description: 'Gerrit target branch'
+        required: false
+        type: string
+        default: ''
+      gerrit_url:
+        description: 'Gerrit server URL; empty uses vars.GERRIT_URL'
+        required: false
+        type: string
+        default: ''
+    outputs:
+      toolchain:
+        description: 'Exact toolchain every job in the run uses'
+        value: ${{ jobs.rust-metadata.outputs.toolchain }}
+      toolchain_components:
+        description: 'Comma-separated components from the toolchain file'
+        value: ${{ jobs.rust-metadata.outputs.toolchain_components }}
+      toolchain_targets:
+        description: 'Comma-separated targets from the toolchain file'
+        value: ${{ jobs.rust-metadata.outputs.toolchain_targets }}
+      test_matrix:
+        description: 'JSON array of {toolchain, label} test legs'
+        value: ${{ jobs.rust-metadata.outputs.test_matrix }}
+      runners:
+        description: 'Validated JSON array of {runner, arch} objects'
+        value: ${{ jobs.rust-metadata.outputs.runners }}
+      msrv:
+        description: 'rust-version the manifest declares; empty if none'
+        value: ${{ jobs.rust-metadata.outputs.msrv }}
+      package_name:
+        description: 'Package name; empty for a virtual workspace'
+        value: ${{ jobs.rust-metadata.outputs.package_name }}
+      package_version:
+        description: 'Package version; empty for a virtual workspace'
+        value: ${{ jobs.rust-metadata.outputs.package_version }}
+      publishable_packages:
+        description: 'JSON array of the selected packages cargo publish uploads'
+        value: ${{ jobs.rust-metadata.outputs.publishable_packages }}
+      publishable_count:
+        description: 'Number of entries in publishable_packages'
+        value: ${{ jobs.rust-metadata.outputs.publishable_count }}
+      lockfile_generated:
+        description: "'true' when this job resolved and uploaded Cargo.lock"
+        value: ${{ jobs.rust-metadata.outputs.lockfile_generated }}
+      lockfile_dir:
+        description: 'Directory of Cargo.lock, relative to the workspace'
+        value: ${{ jobs.rust-metadata.outputs.lockfile_dir }}
+      lockfile_artefact:
+        description: 'Artefact holding the resolved Cargo.lock'
+        value: ${{ jobs.rust-metadata.outputs.lockfile_artefact }}
+
+permissions: {}
+
+jobs:
+  rust-metadata:
+    name: 'Rust Metadata'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    timeout-minutes: 10
+    outputs:
+      toolchain: ${{ steps.resolve.outputs.toolchain }}
+      # yamllint disable-line rule:line-length
+      toolchain_components: ${{ steps.resolve.outputs.toolchain_components }}
+      toolchain_targets: ${{ steps.resolve.outputs.toolchain_targets }}
+      test_matrix: ${{ steps.resolve.outputs.test_matrix }}
+      runners: ${{ steps.resolve.outputs.runners }}
+      msrv: ${{ steps.resolve.outputs.msrv }}
+      package_name: ${{ steps.metadata.outputs.rust_package_name }}
+      package_version: ${{ steps.metadata.outputs.project_version }}
+      publishable_packages: ${{ steps.resolve.outputs.publishable_packages }}
+      publishable_count: ${{ steps.resolve.outputs.publishable_count }}
+      lockfile_generated: ${{ steps.lockfile.outputs.generated }}
+      lockfile_dir: ${{ steps.lockfile.outputs.dir }}
+      lockfile_artefact: ${{ steps.lockfile.outputs.artefact }}
+    steps:
+      - name: 'Load egress allow-list'
+        # yamllint disable-line rule:line-length
+        uses: lfreleng-actions/harden-runner-block-action@51ef68401547a8b648275129b9a21544612596d5  # v0.13.1
+        with:
+          config: ${{ inputs.harden_runner_allowlist }}
+      - name: 'Harden runner'
+        # yamllint disable-line rule:line-length
+        uses: step-security/harden-runner@ccd8616d44fd3846e67624a50d5aad6d37bf2d25  # v2.22.1
+        with:
+          # yamllint disable-line rule:line-length
+          egress-policy: ${{ inputs.harden_runner_egress == 'audit' && 'audit' || 'block' }}
+          allowed-endpoints: >
+            ${{ env.CONNECTION_ALLOW_LIST }}
+
+      - name: 'Checkout Gerrit change'
+        if: inputs.gerrit_refspec != ''
+        # yamllint disable-line rule:line-length
+        uses: lfreleng-actions/checkout-gerrit-change-action@35e98c8043ec411611e464e296bcfb441a5c5093  # v1.1.2
+        with:
+          gerrit-refspec: ${{ inputs.gerrit_refspec }}
+          gerrit-project: ${{ inputs.gerrit_project }}
+          # yamllint disable-line rule:line-length
+          gerrit-url: ${{ inputs.gerrit_url != '' && inputs.gerrit_url || vars.GERRIT_URL }}
+          delay: '0s'
+          repository: ${{ inputs.repository || github.repository }}
+          ref: refs/heads/${{ inputs.gerrit_branch }}
+      - name: 'Checkout repository'
+        if: inputs.gerrit_refspec == ''
+        # yamllint disable-line rule:line-length
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: ${{ inputs.repository || github.repository }}
+          ref: ${{ inputs.ref }}
+          persist-credentials: false
+
+      # path_prefix and manifest_path must name a regular Cargo.toml
+      # inside the workspace, reached through no symlink, as the Rust
+      # actions require. Checking here fails a bad value once, before
+      # any matrix leg starts.
+      - name: 'Locate the manifest'
+        id: project
+        shell: bash
+        env:
+          PATH_PREFIX: ${{ inputs.path_prefix }}
+          MANIFEST_PATH: ${{ inputs.manifest_path }}
+        run: |
+          # Locate the manifest
+          set -euo pipefail
+          workspace="$(realpath -e -- "$GITHUB_WORKSPACE")"
+          inside() {
+            case "$1" in
+              "$workspace" | "$workspace"/*) return 0 ;;
+            esac
+            return 1
+          }
+          case "$PATH_PREFIX" in
+            /* | '')
+              echo "::error::path_prefix must be a relative directory"
+              exit 1 ;;
+          esac
+          case "$MANIFEST_PATH" in
+            /* | '')
+              echo "::error::manifest_path must be a relative path"
+              exit 1 ;;
+          esac
+          project="$workspace/$PATH_PREFIX"
+          manifest="$project/$MANIFEST_PATH"
+          if [ ! -d "$project" ] || [ -L "${project%/}" ]; then
+            echo "::error::path_prefix does not name a directory"
+            exit 1
+          fi
+          if [ ! -f "$manifest" ] || [ -L "$manifest" ]; then
+            echo "::error::manifest_path does not name a regular file"
+            exit 1
+          fi
+          project="$(realpath -e -- "$project")"
+          manifest="$(realpath -e -- "$manifest")"
+          if ! inside "$project"; then
+            echo "::error::path_prefix must stay inside the workspace"
+            exit 1
+          fi
+          # The manifest must sit in the project the lane acts on, as the
+          # actions require, or metadata would describe another crate.
+          case "$manifest" in
+            "$project"/*) ;;
+            *)
+              echo "::error::manifest_path must stay inside path_prefix"
+              exit 1 ;;
+          esac
+          if [ "$(basename -- "$manifest")" != 'Cargo.toml' ]; then
+            echo "::error::manifest_path must name a Cargo.toml"
+            exit 1
+          fi
+          manifest_dir="$(dirname -- "$manifest")"
+          relative="${manifest_dir#"$workspace"}"
+          relative="${relative#/}"
+          echo "dir=${relative:-.}" >> "$GITHUB_OUTPUT"
+          echo "manifest=$manifest" >> "$GITHUB_OUTPUT"
+
+      - name: 'Read project metadata'
+        id: metadata
+        # yamllint disable-line rule:line-length
+        uses: lfreleng-actions/build-metadata-action@cc5d2da580c58c96455ebc0cb1004352bece2baa  # v0.10.0
+        with:
+          path_prefix: ${{ steps.project.outputs.dir }}
+          project_type: 'rust-cargo'
+          artifact_upload: 'false'
+          include_environment: 'false'
+
+      # BRIEF Q3 and Q6. Every job receives one exact toolchain, so a
+      # moving channel resolves once, and a caller's own
+      # RUSTUP_TOOLCHAIN never decides what a job builds with. The test
+      # legs resolve the same way.
+      - name: 'Resolve the toolchain and matrices'
+        id: resolve
+        shell: bash
+        env:
+          TOOLCHAIN_INPUT: ${{ inputs.toolchain }}
+          KIND: ${{ steps.metadata.outputs.rust_toolchain_kind }}
+          CHANNEL: ${{ steps.metadata.outputs.rust_toolchain_channel }}
+          FILE: ${{ steps.metadata.outputs.rust_toolchain_file }}
+          # yamllint disable-line rule:line-length
+          COMPONENTS: ${{ steps.metadata.outputs.rust_toolchain_components }}
+          TARGETS: ${{ steps.metadata.outputs.rust_toolchain_targets }}
+          PROJECT_DIR: ${{ steps.project.outputs.dir }}
+          TEST_MATRIX: ${{ inputs.test_matrix }}
+          RUNNERS: ${{ inputs.runners }}
+          MSRV: ${{ steps.metadata.outputs.rust_msrv }}
+          MATRIX_JSON: ${{ steps.metadata.outputs.rust_matrix_json }}
+          # yamllint disable-line rule:line-length
+          PUBLISHABLE: ${{ steps.metadata.outputs.rust_publishable_packages }}
+          PACKAGE_NAME: ${{ steps.metadata.outputs.rust_package_name }}
+          WORKSPACE: ${{ inputs.workspace }}
+          PACKAGES: ${{ inputs.packages }}
+          EXCLUDE: ${{ inputs.exclude }}
+          DIST: 'https://static.rust-lang.org/dist'
+        run: |
+          # Resolve the toolchain and matrices
+          set -euo pipefail
+          # stderr, so an error raised inside $(...) still reaches the log
+          fail() { echo "::error::$*" >&2; exit 1; }
+          name_re='^[A-Za-z0-9._+-]+$'
+          version_re='^[0-9]+\.[0-9]+(\.[0-9]+)?$'
+          # rustup reads the project's toolchain file: run it with the
+          # environment scrub the actions apply (docs/BRIEF.md Q4).
+          scrub=(env -u CARGO_REGISTRY_TOKEN
+            -u ACTIONS_ID_TOKEN_REQUEST_TOKEN
+            -u ACTIONS_ID_TOKEN_REQUEST_URL -u ACTIONS_RUNTIME_TOKEN
+            -u GITHUB_OUTPUT -u GITHUB_ENV -u GITHUB_PATH
+            -u GITHUB_STATE -u GITHUB_STEP_SUMMARY)
+          while IFS= read -r name; do
+            scrub+=(-u "$name")
+          done < <(compgen -e | grep -E '^CARGO_REGISTRIES_.+_TOKEN$' \
+            || true)
+          # A rustup toolchain name: a channel (stable, beta, nightly, a
+          # minor or a full version), an optional date, an optional host.
+          toolchain_re='^(stable|beta|nightly|[0-9]+\.[0-9]+(\.[0-9]+)?)'
+          toolchain_re+='(-([0-9]{4}-[0-9]{2}-[0-9]{2}))?(-.+)?$'
+
+          # Pin a toolchain name to an exact release. A moving channel
+          # (stable, beta, nightly, or a minor such as 1.90) resolves
+          # through its channel manifest, read once per channel. A host
+          # suffix must be a host that release ships for; it is then
+          # dropped, so every platform installs its own host's build.
+          pin() {
+            local name="$1" base date host manifest value url
+            [[ "$name" =~ $toolchain_re ]] \
+              || fail "$name: not a rustup channel a runner can install"
+            base="${BASH_REMATCH[1]}"
+            date="${BASH_REMATCH[4]}"
+            host="${BASH_REMATCH[5]#-}"
+            if [ -z "$host" ]; then
+              if [ -n "$date" ]; then
+                echo "$base-$date"
+                return
+              fi
+              if [[ "$base" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+                echo "$base"
+                return
+              fi
+            fi
+            url="$DIST/channel-rust-$base.toml"
+            manifest="$RUNNER_TEMP/channel-rust-$base.toml"
+            if [ -n "$date" ]; then
+              url="$DIST/$date/channel-rust-$base.toml"
+              manifest="$RUNNER_TEMP/channel-rust-$base-$date.toml"
+            fi
+            if [ ! -s "$manifest" ]; then
+              curl -fsSL --proto '=https' --tlsv1.2 --retry 3 \
+                -o "$manifest" "$url" \
+                || fail "$name: Rust ships no ${date:+$date }$base release"
+            fi
+            if [ -n "$host" ]; then
+              grep -qxF "[pkg.rustc.target.$host]" "$manifest" \
+                || fail "$name: $host is not a host Rust $base ships for"
+              echo "::notice::Dropping the host from $name; each" \
+                "platform installs its own" >&2
+              if [ -n "$date" ]; then
+                echo "$base-$date"
+                return
+              fi
+              if [[ "$base" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+                echo "$base"
+                return
+              fi
+            fi
+            case "$base" in
+              beta | nightly)
+                value="$(sed -nE \
+                  '/^date = /{s/^date = "([0-9-]+)"$/\1/p;q}' "$manifest")"
+                [[ "$value" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]] \
+                  || fail "No date in the Rust $base channel manifest"
+                value="$base-$value"
+                ;;
+              *)
+                value="$(awk '
+                  /^\[pkg\.rust\]$/ { in_rust = 1; next }
+                  /^\[/ { in_rust = 0 }
+                  in_rust && /^version = "/ { print; exit }
+                ' "$manifest" | sed -E 's/^version = "([0-9.]+).*/\1/')"
+                [[ "$value" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] \
+                  || fail "No Rust version in the $base channel manifest"
+                ;;
+            esac
+            echo "$value"
+          }
+
+          ### The project toolchain ###
+
+          if [ -n "$TOOLCHAIN_INPUT" ]; then
+            [[ "$TOOLCHAIN_INPUT" =~ $name_re ]] \
+              || fail "toolchain: not a rustup toolchain name"
+            requested="$TOOLCHAIN_INPUT"
+            source='the toolchain input'
+          else
+            case "$KIND" in
+              channel)
+                [[ "$CHANNEL" =~ $name_re ]] \
+                  || fail "The toolchain file names no usable channel"
+                requested="$CHANNEL"
+                source="$FILE"
+                ;;
+              path)
+                fail "$FILE selects a path toolchain, which no runner" \
+                  "has. Set the toolchain input to a channel instead."
+                ;;
+              none | '')
+                # A file rustup rejects also reports 'none'. Ask rustup
+                # to read it, so a broken file fails the run rather
+                # than silently building with stable.
+                dir="$GITHUB_WORKSPACE/$PROJECT_DIR"
+                while :; do
+                  if [ -f "$dir/rust-toolchain" ] \
+                    || [ -f "$dir/rust-toolchain.toml" ]; then
+                    if ! (cd "$GITHUB_WORKSPACE/$PROJECT_DIR" \
+                      && "${scrub[@]}" RUSTUP_AUTO_INSTALL=0 \
+                      rustup show active-toolchain > /dev/null); then
+                      fail "rustup rejects the toolchain file in" \
+                        "${dir#"$GITHUB_WORKSPACE"/}"
+                    fi
+                    break
+                  fi
+                  [ "$dir" = "$GITHUB_WORKSPACE" ] && break
+                  dir="$(dirname -- "$dir")"
+                done
+                requested='stable'
+                source='the default'
+                ;;
+              *)
+                fail "Unexpected rust_toolchain_kind from build-metadata"
+                ;;
+            esac
+          fi
+          resolved="$(pin "$requested")"
+
+          # Forward the file's components and targets: a toolchain
+          # override makes rustup ignore the file, so the jobs install
+          # them for the resolved toolchain instead.
+          # A name rustup could not install fails here, as rustup would
+          # fail on the file.
+          clean_list() {
+            local item out='' items=()
+            IFS=', ' read -r -a items <<< "$1"
+            for item in "${items[@]}"; do
+              [[ "$item" =~ $name_re ]] \
+                || fail "The toolchain file lists an invalid $2 name"
+              out="${out:+$out,}$item"
+            done
+            echo "$out"
+          }
+          components="$(clean_list "$COMPONENTS" component)"
+          targets="$(clean_list "$TARGETS" target)"
+
+          ### Runners (D4) ###
+
+          # One entry per platform. 'arch' names the artefacts, so each
+          # must be distinct and safe in an artefact name.
+          if ! runners="$(jq -ce '
+              if type == "array" and length > 0
+                and all(.[]; type == "object"
+                  and (.runner | type) == "string"
+                  and (.arch | type) == "string"
+                  and (.runner | test("^[A-Za-z0-9._-]+$"))
+                  and (.arch | test("^[A-Za-z0-9_-]+$")))
+                and (map(.arch) | unique | length) == length
+              then [.[] | {runner, arch}]
+              else error("invalid") end' <<< "$RUNNERS" 2> /dev/null)"
+          then
+            fail "runners: expected a JSON array of {runner, arch}" \
+              "objects with distinct arch values"
+          fi
+
+          ### Test legs (Q6) ###
+
+          msrv=''
+          if [ -n "$MSRV" ]; then
+            if [[ "$MSRV" =~ $version_re ]]; then
+              msrv="$MSRV"
+            else
+              echo "::warning::Ignoring an unusable rust-version"
+            fi
+          fi
+          legs="$(jq -cn --arg t "$resolved" \
+            '[{toolchain: $t, label: "project"}]')"
+          add_leg() {
+            local toolchain
+            toolchain="$(pin "$1")"
+            legs="$(jq -c --arg t "$toolchain" --arg l "$2" \
+              '. + [{toolchain: $t, label: $l}]' <<< "$legs")"
+          }
+          case "$TEST_MATRIX" in
+            project) ;;
+            msrv)
+              if [ -n "$msrv" ]; then
+                add_leg "$msrv" 'msrv'
+              fi
+              ;;
+            full)
+              if [ -z "$MATRIX_JSON" ]; then
+                echo "::warning::The manifest declares neither" \
+                  "rust-version nor edition; testing the project" \
+                  "toolchain alone"
+              else
+                while IFS= read -r entry; do
+                  if [ "$entry" = 'stable' ] \
+                    || [[ "$entry" =~ $version_re ]]; then
+                    add_leg "$entry" "$entry"
+                  fi
+                done < <(jq -r '."rust-version"[]? // empty' \
+                  <<< "$MATRIX_JSON")
+              fi
+              ;;
+            *)
+              fail "test_matrix: expected 'project', 'msrv' or 'full'"
+              ;;
+          esac
+          # Every leg is pinned, so equal toolchains mean equal legs:
+          # keep the first, and with it the project leg.
+          legs="$(jq -c 'reduce .[] as $leg ([];
+            if any(.[]; .toolchain == $leg.toolchain) then .
+            else . + [$leg] end)' <<< "$legs")"
+
+          ### Publishable packages ###
+
+          # Keep the packages the lane acts on, as the publisher picks
+          # them: crates crates.io accepts (the lanes publish nowhere
+          # else, so a crate whose 'publish' names other registries
+          # alone stays out), then named packages, else every member
+          # less exclude, else the manifest's own package.
+          read_names() {
+            local item items=()
+            read -r -a items <<< "$1"
+            for item in "${items[@]}"; do
+              [[ "$item" =~ ^[A-Za-z0-9_-]+$ ]] \
+                || fail "$2: not a package name list"
+              printf '%s\n' "$item"
+            done | jq -R . | jq -sc .
+          }
+          publishable="$(jq -ce 'if type == "array" then . else
+            error("invalid") end' <<< "${PUBLISHABLE:-[]}" 2> /dev/null)" \
+            || fail "build-metadata-action returned unusable package data"
+          packages="$(read_names "$PACKAGES" packages)"
+          exclude="$(read_names "$EXCLUDE" exclude)"
+          publishable="$(jq -c --argjson p "$packages" \
+            --argjson x "$exclude" --arg w "$WORKSPACE" \
+            --arg own "$PACKAGE_NAME" '
+            map(select(.registries == null
+              or (.registries | index("crates-io"))))
+            | if ($p | length) > 0 then
+              map(select(.name as $n | $p | index($n)))
+            elif $w == "true" then
+              map(select(.name as $n | $x | index($n) | not))
+            else map(select(.name == $own)) end' <<< "$publishable")"
+
+          {
+            echo "toolchain=$resolved"
+            echo "toolchain_components=$components"
+            echo "toolchain_targets=$targets"
+            echo "test_matrix=$legs"
+            echo "runners=$runners"
+            echo "msrv=$msrv"
+            echo "publishable_packages=$publishable"
+            echo "publishable_count=$(jq length <<< "$publishable")"
+          } >> "$GITHUB_OUTPUT"
+          {
+            echo '## 🦀 Rust Metadata'
+            echo
+            echo '| Item | Value |'
+            echo '| ---- | ----- |'
+            echo "| Toolchain requested | \`$requested\` ($source) |"
+            echo "| Toolchain resolved | \`$resolved\` |"
+            echo "| Components | ${components:-none} |"
+            echo "| Targets | ${targets:-none} |"
+            echo "| MSRV | ${msrv:-none declared} |"
+            echo "| Test legs | $(jq -r 'map(.label + " " +
+              .toolchain) | join(", ")' <<< "$legs") |"
+            echo "| Runners | $(jq -r 'map(.arch + " on " +
+              .runner) | join(", ")' <<< "$runners") |"
+            echo "| Packages to publish | $(jq -r 'map(.name + " " +
+              .version) | join(", ") | if . == "" then "none" else .
+              end' <<< "$publishable") |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # BRIEF Q6 and D5. A lockfile the project commits is used as is.
+      # Without one, the lane either fails here (lockfile_required) or
+      # resolves one now and hands it to the jobs that read the graph.
+      - name: 'Resolve the lockfile'
+        id: lockfile
+        shell: bash
+        env:
+          LOCKFILE_REQUIRED: ${{ inputs.lockfile_required }}
+          MANIFEST: ${{ steps.project.outputs.manifest }}
+          TOOLCHAIN: ${{ steps.resolve.outputs.toolchain }}
+          SUFFIX: ${{ inputs.artefact_suffix }}
+        run: |
+          # Resolve the lockfile
+          set -euo pipefail
+          fail() { echo "::error::$*"; exit 1; }
+          scrub=(env -u CARGO_REGISTRY_TOKEN
+            -u ACTIONS_ID_TOKEN_REQUEST_TOKEN
+            -u ACTIONS_ID_TOKEN_REQUEST_URL -u ACTIONS_RUNTIME_TOKEN
+            -u GITHUB_OUTPUT -u GITHUB_ENV -u GITHUB_PATH
+            -u GITHUB_STATE -u GITHUB_STEP_SUMMARY)
+          while IFS= read -r name; do
+            scrub+=(-u "$name")
+          done < <(compgen -e | grep -E '^CARGO_REGISTRIES_.+_TOKEN$' \
+            || true)
+
+          command -v rustup > /dev/null \
+            || fail "The runner has no rustup; the Rust lanes need it"
+          (cd "$RUNNER_TEMP" && "${scrub[@]}" rustup toolchain install \
+            "$TOOLCHAIN" --profile minimal --no-self-update)
+          export RUSTUP_TOOLCHAIN="$TOOLCHAIN"
+
+          # Cargo reads .cargo/config.toml from its working directory
+          # upwards, so run it where the actions run it: in the
+          # manifest's directory.
+          cd "$(dirname -- "$MANIFEST")"
+          root="$("${scrub[@]}" cargo locate-project --workspace \
+            --message-format plain --manifest-path "$MANIFEST")" \
+            || fail "cargo could not find the workspace root"
+          root_dir="$(dirname -- "$root")"
+          relative="${root_dir#"$GITHUB_WORKSPACE"}"
+          relative="${relative#/}"
+          relative="${relative:-.}"
+          echo "dir=$relative" >> "$GITHUB_OUTPUT"
+
+          if [ -f "$root_dir/Cargo.lock" ]; then
+            echo "generated=false" >> "$GITHUB_OUTPUT"
+            printf '\nCargo.lock: committed ✅\n' >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          if [ "$LOCKFILE_REQUIRED" = 'true' ]; then
+            fail "The project commits no Cargo.lock, and this lane" \
+              "sets lockfile_required. Commit the lockfile."
+          fi
+          echo "::warning::The project commits no Cargo.lock; resolving" \
+            "one for this run"
+          "${scrub[@]}" cargo generate-lockfile --manifest-path "$MANIFEST"
+          {
+            echo "generated=true"
+            echo "artefact=rust-lockfile$SUFFIX"
+            echo "path=$root_dir/Cargo.lock"
+          } >> "$GITHUB_OUTPUT"
+          printf '\nCargo.lock: resolved for this run ⚠️\n' \
+            >> "$GITHUB_STEP_SUMMARY"
+
+      - name: 'Upload the resolved lockfile'
+        if: steps.lockfile.outputs.generated == 'true'
+        # yamllint disable-line rule:line-length
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
+        with:
+          name: ${{ steps.lockfile.outputs.artefact }}
+          path: ${{ steps.lockfile.outputs.path }}
+          if-no-files-found: error
+          retention-days: 7
