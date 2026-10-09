@@ -37,18 +37,18 @@ State on 2026-10-09.
 
 <!-- markdownlint-disable MD013 -->
 
-| Stage        | Repository                  | State                                                                                                                            |
-| ------------ | --------------------------- | -------------------------------------------------------------------------------------------------------------------------------- |
-| Metadata     | `build-metadata-action`     | Released v0.10.0 with Rust support                                                                                               |
-| Lint         | `standalone-linting-action` | Released v0.7.0 with Rust toolchain preparation                                                                                  |
-| Build        | `rust-build-action`         | Released v0.0.1; install-failure wording fix in review (#4)                                                                      |
-| Test         | `rust-test-action`          | Released v0.0.1                                                                                                                  |
-| Audit        | `rust-audit-action`         | Released v0.0.1                                                                                                                  |
-| SBOM         | `sbom-action`               | Released v0.3.0 (`syft` reads `Cargo.lock`); Cargo backend in review (#53)                                                       |
-| Scan         | `grype-scan-action`         | Released v0.2.0; Cargo graph classification planned (#31, after #25)                                                             |
-| CBOM         | `cbom-action`               | No Rust coverage upstream; tracked in #10                                                                                        |
-| Publish      | `rust-crate-publish-action` | Released v0.0.1; named registries (#12) and workspace sets (#13) merged for v0.1.0; semver checks in review (#11)                |
-| Test fixture | `test-rust-project`         | Crate `lfreleng-test-rust-project` 0.1.0 on crates.io; fixture variants merged (#12); Trusted Publishing release in review (#11) |
+| Stage        | Repository                  | State                                                                                                 |
+| ------------ | --------------------------- | ----------------------------------------------------------------------------------------------------- |
+| Metadata     | `build-metadata-action`     | Released v0.10.0 with Rust support                                                                    |
+| Lint         | `standalone-linting-action` | Released v0.7.0 with Rust toolchain preparation                                                       |
+| Build        | `rust-build-action`         | Released v0.0.2                                                                                       |
+| Test         | `rust-test-action`          | Released v0.0.1                                                                                       |
+| Audit        | `rust-audit-action`         | Released v0.0.1                                                                                       |
+| SBOM         | `sbom-action`               | Released v0.3.0 (`syft` reads `Cargo.lock`); Cargo backend in review (#53)                            |
+| Scan         | `grype-scan-action`         | Released v0.2.0; Cargo graph classification planned (#31, after #25)                                  |
+| CBOM         | `cbom-action`               | Released v0.0.1; no Rust coverage upstream (#10), so the lanes scan other languages alone             |
+| Publish      | `rust-crate-publish-action` | Released v0.1.0: named registries, workspace sets, semver checks                                      |
+| Test fixture | `test-rust-project`         | Crate `lfreleng-test-rust-project` 0.1.1 on crates.io, published through Trusted Publishing; variants |
 
 <!-- markdownlint-enable MD013 -->
 
@@ -109,8 +109,8 @@ The build, test and audit actions report `toolchain`, `toolchain_kind`,
 compare what each job ran. The publisher reports `cargo_version` alone
 and has no `toolchain` input: it pins whatever rustup selects for the
 project, which honours `RUSTUP_TOOLCHAIN` (Q3 relies on that). It also
-takes `registry`, to publish to a named Cargo registry, and, once #11
-merges, `semver_checks`.
+takes `registry`, to publish to a named Cargo registry, and
+`semver_checks`.
 
 ### Q3: One toolchain per run
 
@@ -120,9 +120,11 @@ every later cargo, rustup and tool call by exporting
 A release refuses a path toolchain (a local directory).
 
 In the workflows, a `rust-metadata` job runs `build-metadata-action`
-first, and every job that runs cargo waits for it. It resolves the
-project toolchain, passes it to each later job through the same
-`toolchain` input, and builds the test matrix (Q6) from it and
+first, and every job that runs cargo waits for it. It lives in its own
+reusable workflow, `rust-metadata.yaml`, which each lane calls through
+the self-repository form (`$/`), so the three lanes can't drift. It
+resolves the project toolchain, passes it to each later job through
+the same `toolchain` input, and builds the test matrix (Q6) from it and
 `rust_msrv`: the pattern the Python family uses for its interpreter
 matrix.
 
@@ -141,11 +143,21 @@ toolchain for the whole run:
   channel instead. A path names a directory on the developer's machine,
   which no runner has, and substituting `stable` for it would hide the
   mismatch;
-- a moving channel (`stable`, `beta`, `nightly`): resolved through
-  rustup to the exact release it points at (for example `1.90.0`, or a
-  dated `nightly-YYYY-MM-DD`), so a release landing mid-run can't give
-  two jobs different compilers;
-- an exact version or dated toolchain: forwarded unchanged.
+- a moving channel (`stable`, `beta`, `nightly`, or a minor such as
+  `1.90`): resolved through its channel manifest on
+  `static.rust-lang.org` to the exact release it points at (for
+  example `1.90.0`, or a dated `nightly-YYYY-MM-DD`), so a release
+  landing mid-run can't give two jobs different compilers;
+- an exact version or dated toolchain: forwarded unchanged;
+- a host suffix (`stable-x86_64-unknown-linux-gnu`): checked against
+  the hosts that release ships for, then dropped, so each platform in
+  `runners` installs its own host's build; an unknown host, such as a
+  typo, fails the run;
+- any other name, such as a toolchain linked on a developer's machine:
+  the run fails, since no runner has it.
+
+The test legs resolve the same way, so the MSRV leg runs the latest
+patch of the declared minor.
 
 Because every job receives a non-empty `toolchain`, a caller's own
 `RUSTUP_TOOLCHAIN` never decides what a job builds with. An override
@@ -224,7 +236,7 @@ matrix instead (Q10).
 
 ```text
 gerrit-validate -> { repository-metadata | rust-metadata }
-rust-metadata -> build -> { tests | audit | sbom -> grype }
+rust-metadata -> build -> { tests | audit | sbom -> grype | cbom }
 ```
 
 - `repository-metadata` stays informational and gates nothing.
@@ -238,7 +250,9 @@ rust-metadata -> build -> { tests | audit | sbom -> grype }
     none;
   - `full`: the project toolchain plus every version in
     `build-metadata-action`'s `rust_matrix_json` (the MSRV, up to six
-    recent stable minors, and `stable`).
+    recent stable minors, and `stable`). Every leg resolves to an
+    exact release first, so two entries naming one release, such as
+    `1.99` and `stable`, share a leg.
 
   The project toolchain always has a leg, so a pinned or nightly
   toolchain is never left out.
@@ -251,45 +265,80 @@ rust-metadata -> build -> { tests | audit | sbom -> grype }
 - With `cache: true` (D1), `build` and `tests` restore and save a
   Cargo cache. The release and merge lanes never restore one, so no
   cache written by a pull request can reach a published crate.
-- When the project commits no `Cargo.lock`, `build` resolves one and
-  the workflow uploads it. `audit` and `sbom` restore it into their
-  checkouts before running, so they read the dependency graph the
-  build used. Syft reads `Cargo.lock` and runs no cargo, so without the
-  handoff the SBOM, and the Grype scan of it, would miss every Rust
-  dependency.
+- When the project commits no `Cargo.lock`, `rust-metadata` resolves
+  one with `cargo generate-lockfile` and uploads it, and `build`,
+  `tests`, `audit` and `sbom` restore it into their checkouts. Every
+  job then reads the dependency graph the build used. Syft reads
+  `Cargo.lock` and runs no cargo, so without the handoff the SBOM, and
+  the Grype scan of it, would miss every Rust dependency. Resolving a
+  lockfile reads the registry index and runs no crate code; Cargo picks
+  a lockfile format the declared `rust-version` can read, so the MSRV
+  leg reads it too.
+- The `sbom` job records whether the change touched `Cargo.toml`,
+  `Cargo.lock` or Cargo configuration, comparing the commit under test
+  with its first parent, in a `dependency-change.json` sidecar beside
+  the SBOM. With `grype_gate_when: dependencies-changed`, Grype gates
+  when that answer is yes, treats a missing answer as yes, and
+  otherwise reports its findings as warnings.
+- `cbom` is advisory (Q13).
 
 ### Q7: Release job graph (Model A)
 
 ```text
 tag-validate -> rust-metadata -> build
   -> { audit | sbom -> grype } -> tests
-  -> crate-verify -> attach-artefacts -> promote-release
-  -> publish (opt-in)
+  -> crate-verify -> attach-artefacts -> publish (opt-in)
+  -> promote-release
 ```
 
 - As in Python, audits gate the test matrix on a release, and nothing
-  reaches promotion past a failing gate.
-- `build` runs with `package_crates: true` and, when the project ships
-  binaries, `binaries: true`.
+  reaches promotion past a failing gate. A gate the caller switched
+  off counts as passed; one that was on and skipped does not.
+- `tag-validate` requires a signed SemVer tag that is not a
+  pre-release, and fails when the tag already has a published release,
+  which immutable releases could no longer change. It resolves the
+  tag to its commit, and every later job builds that commit, so a
+  caller can't release other source under a valid tag; a `ref`
+  naming another commit fails the run. `tag_enforce_increment`,
+  `tag_require_branch` and `tag_require_latest` add the ordering and
+  branch checks `tag-validate-action` offers. The lane
+  leaves out its `require_recent` check: a three-minute window makes
+  every later re-run of the validation fail.
+- `build` checks the tag against every publishable crate's version
+  before compiling, so a mis-tag fails in seconds. The first platform
+  runs with `package_crates: true`; with `binaries: true`, every
+  platform collects its binaries.
 - `crate-verify` runs `rust-crate-publish-action` with `dry_run: true`
   and `release_tag` set. It checks the tag against the crate version,
   checks the archive size, compiles the packaged crate, and records the
   archive digest as `crate_sha256`. A version already on crates.io with
-  identical content skips; different content fails the release.
+  identical content skips; different content fails the release. It
+  doesn't run for a project with no publishable crate, whose release
+  carries binaries and SBOMs alone.
 - The publisher has no `setup_script` input, yet `crate-verify`
   compiles. When the caller sets `setup_script`, the workflow runs it
   as its own step first, in both models, with the same path validation
   and environment scrub the actions apply. The publish job never runs
   it: that job compiles nothing, so it needs no native libraries.
-- `attach-artefacts` attaches the `.crate` files, binaries, SBOMs and a
-  `SHA256SUMS` file to the draft release, with build provenance
-  attestations when `attestations: true` and Sigstore signatures when
-  `sigstore_sign: true` (both default `true`, as in Python; D3).
-  Attesting needs
-  `id-token: write` and `attestations: write`, so this job holds both
-  when attestations are on. It runs no crate code: it downloads the
-  artefacts, hashes and attests them, and uploads them, and never
-  executes a downloaded binary.
+- `attach-artefacts` drafts the release when release-drafter has not,
+  and attaches the `.crate` files, binaries, SBOMs and a `SHA256SUMS`
+  file, with build provenance attestations (`actions/attest`, over
+  `SHA256SUMS`) when `attestations: true` and a cosign Sigstore bundle
+  beside each asset when `sigstore_sign: true` (both default `true`,
+  as in Python; D3). It requires each `.crate` from the build to match
+  `crate-verify`'s digest, so a release asset is byte-identical to the
+  crates.io upload. Binaries gain their platform's `arch`, so platforms
+  can't clash. Attesting and signing need `id-token: write` and
+  `attestations: write`, so this job holds both. It runs no crate code:
+  it downloads the artefacts, hashes, attests, signs and uploads them,
+  and never executes a downloaded binary.
+- `publish` runs before `promote-release`, so a failed upload leaves a
+  draft rather than a public release without its crates.
+- With `dry_run: true` and a `tag`, the lane rehearses a release on an
+  existing tag: it validates, builds, tests, audits and verifies, then
+  drafts, attests, signs, publishes and promotes nothing. It uploads
+  the assets it would have attached as a `release-assets` artefact
+  instead. The self-test uses this mode.
 
 ### Q8: Merge job graph (Model B)
 
@@ -297,22 +346,45 @@ crates.io has no snapshots, and its versions are immutable, so Model B
 changes shape for Rust:
 
 ```text
-rust-metadata -> build -> snapshot (workflow artefact, dry run)
-rust-metadata -> check-release
-{ build | check-release } -> crate-verify -> publish -> tag
+check-release -> rust-metadata -> build
+  -> { tests | audit | sbom -> grype }
+  -> crate-verify -> publish -> tag
 ```
 
-- Every merge builds, packages and dry-runs the publish, then uploads
-  the result as a workflow artefact. That proves the merged commit is
-  publishable without spending a crates.io version.
-- A release happens when the merged change adds a release file under
-  `releases/`. `check-release` requires the file's version to equal the
-  crate version, `crate-verify` dry-runs it, `publish` uploads it, and
-  the workflow then creates the matching tag.
-- `crate-verify` waits for `build` as well as `check-release`, and both
-  must succeed. Its own compile covers the packaged crate alone, not
-  the workspace, targets or binaries `build` covers, so a failed build
-  must stop the release.
+- Every merge builds, packages, tests, audits and scans the merged
+  commit, and dry-runs the publish. The packaged crates stay in the
+  build's workflow artefact: the merge's snapshot. That proves the
+  merged commit publishable without spending a crates.io version, and
+  the full Grype scan catches CVEs published since the pull request
+  (grype-scan-action #10, phase 3).
+- A release happens when the merged change adds one YAML file directly
+  under `releases/`, a regular file with a single top-level
+  `version: X.Y.Z`: a final release with no pre-release or build
+  part, as Model A requires of its tags. On a GitHub push,
+  `check-release` looks at every commit the push added, so a batched
+  push or a rebase merge can't hide a release file in an earlier
+  commit; on a Gerrit dispatch it compares the merged commit with its
+  first parent. `crate-verify`
+  passes `v<version>` as the publisher's `release_tag`, which requires
+  every crate version to equal it; `publish` uploads; and the `tag` job
+  then creates `v<version>` on the merged commit.
+- `check-release` resolves the merged commit once, and every later
+  job checks out that commit on both checkout paths: a Gerrit
+  dispatch names a branch, which a later merge can move mid-run. The
+  version check, the build, the gates and the upload then all act on
+  one commit, and a later merge can't hide this one's release file.
+- `crate-verify` waits for every gate as well as `check-release`, and
+  every gate must pass, or the caller must have turned it off. Its own
+  compile covers the
+  packaged crate alone, not the workspace, targets or binaries `build`
+  covers, so a failed build must stop the release.
+- The `tag` job creates a lightweight tag through the GitHub API with
+  `GITHUB_TOKEN`, so the tag starts no other workflow. It's idempotent
+  on a re-run and fails rather than move a tag on another commit. No
+  sibling lane tags yet, and signed tags remain a release-engineering
+  decision (docker-workflows #110), so Gerrit projects set
+  `create_tag: false` and tag in Gerrit, which replicates to the
+  mirror.
 - The publish job runs from the merged branch commit, before the tag
   exists, so its environment can't use Model A's tag rule. A
   Model B project restricts its `publish_environment` to the protected
@@ -400,6 +472,10 @@ match the Python family where the meaning matches.
 | `cache`                                                           | build, tests          | `false` (D1)                                                         |
 | `build_timeout_minutes`, `test_timeout_minutes`                   | build, tests          | `20`, `20` (D6)                                                      |
 | `audit_timeout_minutes`                                           | audit, sbom, grype    | `10` (D6)                                                            |
+| `auditable`                                                       | build                 | `false`                                                              |
+| `grype_gate_when`, `grype_only_fixed`, `grype_cache_db`           | grype                 | `always`, `false`, `true`                                            |
+| `cbom_enabled`, `cbom_languages`, `cbom_timeout_minutes`          | cbom                  | `false`, `''`, `30` (Q13)                                            |
+| `artefact_suffix`                                                 | every artefact name   | `''`                                                                 |
 
 <!-- markdownlint-enable MD013 -->
 
@@ -408,12 +484,31 @@ family's multi-architecture workflows: `runner` supplies `runs-on` and
 `arch` names the artefacts. Arm64 runners such as `ubuntu-24.04-arm`
 are free on public repositories, so a project adds that leg itself.
 
+`artefact_suffix` follows the Java family's `artifact_suffix`: a
+workflow that calls one lane more than once in a run, such as a
+monorepo verifying each crate, gives each call its own suffix so their
+artefact names can't clash.
+
+The verify lane's test, audit and Grype jobs fall back to the
+`NO_BLOCK_AUDIT_FAIL` repository variable when their `permit_fail`
+input is `false`, as the template does. The release and merge lanes
+honour it for Grype alone, as Python does: a release should not pass a
+failing test or audit because of a repository-wide switch.
+
 The release and merge workflows take the same inputs, except that
-`lockfile_required` defaults to `true` (D5) and `cache` does not exist
-(D1). The release workflow adds `attestations` (`true`),
-`sigstore_sign` (`true`, D3), `publish_enabled` (`false`) and
-`publish_environment` (`production`), and exposes the validated tag as
-its `tag` output.
+`lockfile_required` defaults to `true` (D5), `cache` does not exist
+(D1), and `grype_gate_when`, `grype_cache_db`, `sbom_include_dev` and
+the CBOM inputs belong to the verify lane alone: a release scan always
+gates and never writes the database cache, and `sbom_include_dev`
+changes nothing until the lanes move to the `cargo` SBOM backend
+(Q13), when all three lanes gain it. Both add `semver_checks` (`false`),
+`publish_enabled` (`false`), `publish_environment` (`production`) and
+`dry_run` (`false`). The release workflow also adds `attestations`
+(`true`), `sigstore_sign` (`true`, D3), `tag` (for a dry run) and the
+`tag_*` policy inputs, and exposes `tag`, `crate_name`,
+`crate_version`, `publish_status` and `release_url`. The merge workflow
+adds `create_tag` (`true`) and exposes `has_release`, `version`,
+`crate_name`, `crate_sha256`, `publish_status` and `tag`.
 
 **Not exposed** (kept at action defaults, added on demand): tool
 versions (`nextest_version`, `llvm_cov_version`,
@@ -461,9 +556,24 @@ sibling workspace member's dependencies as inherited. The planned rule
 counts a component as part of the project unless its `bom-ref` names a
 registry or Git source, so an unknown shape gates rather than passes.
 
-The Python family's CBOM job has no Rust counterpart: CBOMkit and
-sonar-cryptography do not analyse Rust (cbom-action #10). The Rust
-lanes add one once upstream support exists.
+The lanes expose the Grype controls v0.2.0 releases (the severity
+threshold, fixed-advisory filtering, `gate-when`, `cache-db` and
+`permit-fail`) and not the
+inputs #25 plans (`dependency-policy`, `transitive-fail-on`): passing
+an input a release lacks would draw a warning and nothing more, and the
+lane would
+advertise a control that does nothing. Each lands as a lane input once
+a grype-scan-action release carries it. A release or merge scan always
+gates, whatever changed.
+
+CBOM: `cbom-action` covers Java, Python and Go (C# in preview), and
+CBOMkit and sonar-cryptography do not analyse Rust (cbom-action #10).
+The verify lane carries the Python family's CBOM job, off by default
+(`cbom_enabled: false`) and advisory, so a Rust project with Python
+bindings or Go tooling can scan those sources; on a pure Rust project
+the action's detection finds nothing and skips. The lane rejects
+`cbom_languages: rust`, which the action would fail on. The default
+changes once upstream support exists.
 
 ### Q14: Examples and self-test
 
@@ -472,29 +582,41 @@ lanes add one once upstream support exists.
   comment, as in Python.
 - `testing.yaml` calls the reusable workflows by self-repository path
   on `pull_request` and `workflow_dispatch`, against `test-rust-project`
-  and its fixture variants under `variants/`: `workspace`,
-  `no-lockfile`, `msrv`, `dependencies`, `native` (through
-  `setup_script`) and `features`, each selected through `path_prefix`.
-- `testing.yaml` does not exercise the release lane's publish path:
-  nobody can take a crates.io version back. `test-rust-project`'s own
-  tag releases exercise it instead.
+  at a pinned commit:
+  - the verify lane against the root crate (two platforms, nextest,
+    coverage, binaries and dependency-scoped Grype gating) and
+    each fixture variant under `variants/`: `workspace`, `no-lockfile`,
+    `msrv` (the `full` matrix), `dependencies`, `native` (through
+    `setup_script`) and `features`, each selected through
+    `path_prefix`. The root call also enables CBOM, which proves the
+    job's wiring and its clean skip on a pure Rust project, not a
+    scan;
+  - the release lane with `dry_run: true` on the signed tag `v0.1.1`;
+  - the merge lane with `dry_run: true`, on a commit that adds no
+    release file. Both dry runs need write and OIDC grants that
+    `dry_run` never uses, so they run on fork pull requests (tokens
+    without write access) and on manual runs of the default branch,
+    and skip wherever unreviewed workflow changes on a branch of this
+    repository would run with them;
+  - a final job that checks the artefacts the lanes left: the resolved
+    lockfile, the SBOM contents, the dependency-change sidecar, both
+    platforms' binaries, the MSRV leg and the packaged crates.
+- `testing.yaml` does not exercise the publish path: nobody can take a
+  crates.io version back. `test-rust-project`'s own tag releases
+  exercise it instead. The merge lane's release path needs a fixture
+  commit that adds a `releases/` file, listed under Follow-ups; local
+  step tests cover the release-file parsing meanwhile. A CBOM scan
+  waits on Rust support upstream (Q13): a fixture in another language
+  would test cbom-action, not this lane.
 
 ### Q15: Delivery
 
-Each lane lands as its own pull request against this repository, in
-this order, each with atomic signed commits:
-
-1. This brief (merged).
-2. Verify lane: `build-test.yaml`, its examples and `testing.yaml`
-   (#4).
-3. Release lane (Model A): `build-test-release.yaml` and examples (#5).
-   `test-rust-project` then swaps its own release jobs for a caller of
-   this lane, which proves Trusted Publishing through a reusable
-   workflow.
-4. Merge lane (Model B): `merge.yaml` and examples (#6).
-
-Every action the lanes pin has a release, and a maintainer has settled
-the design decisions below, so work on the verify lane can start.
+The three lanes, the shared metadata workflow, their examples and the
+self-test land together, in one pull request of atomic signed commits
+(#4, #6, and #5 bar its last step), so the lanes share one tested
+design from the first release. `test-rust-project` then swaps its own
+release workflow for a caller of the release lane, which proves Trusted
+Publishing through a reusable workflow and completes #5.
 
 ## Decisions D1 to D6
 
@@ -518,17 +640,19 @@ proposal.
 
 <!-- markdownlint-disable MD013 -->
 
-| Repository                  | Item                                                         | State                                                     |
-| --------------------------- | ------------------------------------------------------------ | --------------------------------------------------------- |
-| `rust-workflows`            | Epic #8; lanes #4, #5, #6                                    | Verify lane next                                          |
-| `rust-crate-publish-action` | Workspace sets (#8), named and staging registries (#9)       | Merged; release v0.1.0 pending                            |
-| `rust-crate-publish-action` | Semver checks before a release (#10)                         | In review (#11)                                           |
-| `rust-build-action`         | `cargo auditable` builds (#3)                                | Released in v0.0.1                                        |
-| `test-rust-project`         | Fixture variants (#9)                                        | Merged                                                    |
-| `test-rust-project`         | Trusted Publishing releases (#10)                            | In review (#11); later moves onto the release lane        |
-| `sbom-action`               | `cargo` dependency manager for the `cyclonedx` backend (#51) | In review (#53)                                           |
-| `grype-scan-action`         | Classify Cargo dependency graphs (#31)                       | Measured and planned; lands after #25 and sbom-action #53 |
-| `cbom-action`               | CBOM coverage for Rust (#10)                                 | No upstream support; waiting on CBOMkit                   |
-| `nexus-publish-action`      | Nexus Cargo repositories for snapshots (#185)                | Not available on LF Nexus; snapshots stay artefacts (Q8)  |
+| Repository             | Item                                                                             | State                                                           |
+| ---------------------- | -------------------------------------------------------------------------------- | --------------------------------------------------------------- |
+| `rust-workflows`       | Lanes #4, #6 (epic #8)                                                           | Implemented; first release pending                              |
+| `rust-workflows`       | Release lane #5                                                                  | Implemented; open until `test-rust-project` releases through it |
+| `rust-workflows`       | Switch the SBOM to the `cargo` backend                                           | After an sbom-action release carries #53                        |
+| `rust-workflows`       | Expose `dependency-policy` and `transitive-fail-on` for Grype                    | After a grype-scan-action release carries #25                   |
+| `rust-workflows`       | Check `releases/` files at verify time (docker parity #36)                       | Open                                                            |
+| `test-rust-project`    | Release through this repository's release lane (#5)                              | After the first release of this repository                      |
+| `test-rust-project`    | A fixture commit that adds a `releases/` file, for the merge lane's release path | Open                                                            |
+| `test-rust-project`    | One tag-push workflow (#15)                                                      | In review                                                       |
+| `sbom-action`          | `cargo` dependency manager for the `cyclonedx` backend (#51)                     | In review (#53)                                                 |
+| `grype-scan-action`    | Classify Cargo dependency graphs (#31)                                           | Measured and planned; lands after #25 and sbom-action #53       |
+| `cbom-action`          | CBOM coverage for Rust (#10)                                                     | No upstream support; waiting on CBOMkit                         |
+| `nexus-publish-action` | Nexus Cargo repositories for snapshots (#185)                                    | Not available on LF Nexus; snapshots stay artefacts (Q8)        |
 
 <!-- markdownlint-enable MD013 -->
