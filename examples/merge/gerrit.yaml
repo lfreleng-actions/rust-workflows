@@ -3,15 +3,16 @@
 # SPDX-FileCopyrightText: 2026 The Linux Foundation
 
 # =============================================================================
-# EXAMPLE: Gerrit-wrapped caller for the reusable merge workflow
+# EXAMPLE: Gerrit-wrapped caller for the Rust merge lane (Model B)
 # =============================================================================
 # Use this form when Gerrit is the source of truth (SCM) for your project.
 # gerrit_to_platform dispatches this workflow (via the GitHub API) when a
 # change is MERGED in Gerrit (change-merged event).
 #
-# This is Model B: the MERGE-DRIVEN release model. Every merge publishes
-# a snapshot; a release publish triggers when the merged commit adds a
-# release file under releases/.
+# This is Model B: the MERGE-DRIVEN release model. Every merge builds,
+# tests, audits and scans the merged commit and dry-runs the crates.io
+# publish. A release happens when the merged commit adds one file under
+# releases/ holding 'version: X.Y.Z'; see github.yaml in this directory.
 #
 # DEPLOYMENT NOTES:
 #   * Copy into .github/workflows/ with a filename containing BOTH 'gerrit'
@@ -24,10 +25,10 @@
 #     and GERRIT_REFSPEC is refs/heads/<branch>.
 #   * Merge workflows COMMENT on the change (comment-only) — they never
 #     vote; the change already merged.
+#   * Tags belong in Gerrit, which replicates them to the mirror, so this
+#     caller sets create_tag to false and RelEng tags the release there.
 #   * Set the repository variables GERRIT_SERVER, GERRIT_SSH_USER,
-#     GERRIT_KNOWN_HOSTS, GERRIT_URL, the secret GERRIT_SSH_PRIVKEY, and
-#     (for Nexus publishing) the secrets OP_SERVICE_ACCOUNT_TOKEN and
-#     VAULT_MAPPING_JSON.
+#     GERRIT_KNOWN_HOSTS, GERRIT_URL and the secret GERRIT_SSH_PRIVKEY.
 # =============================================================================
 name: 'Gerrit Merge'
 
@@ -81,9 +82,13 @@ on:
         type: string
         default: ''
 
+# One merge run per branch at a time, in order, and never cancelled: a
+# cancelled release could stop between the crates.io upload and the
+# tag, and a dropped pending run would lose its merge's release file.
 concurrency:
-  group: ${{ github.event.inputs.GERRIT_CHANGE_ID || github.run_id }}
-  cancel-in-progress: true
+  group: gerrit-merge-${{ github.event.inputs.GERRIT_BRANCH || github.ref }}
+  cancel-in-progress: false
+  queue: max
 
 permissions: {}
 
@@ -91,6 +96,7 @@ jobs:
   # Comment on the merged change so the merge pipeline start is visible
   # in Gerrit (comment-only: the change already merged, so no vote).
   notify:
+    name: 'Notify'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -98,12 +104,12 @@ jobs:
     steps:
       - name: 'Harden runner'
         # yamllint disable-line rule:line-length
-        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411  # v2.19.4
+        uses: step-security/harden-runner@ccd8616d44fd3846e67624a50d5aad6d37bf2d25  # v2.22.1
         with:
           egress-policy: audit
       - name: 'Notify merge pipeline start'
         # yamllint disable-line rule:line-length
-        uses: lfreleng-actions/gerrit-review-action@b26a98041c59f9a877048c320313ab13bcc19aae  # v1.0.1
+        uses: lfreleng-actions/gerrit-review-action@1e3eae766b3de755a2e87aa216cedebbaf9c8292  # v1.1.3
         with:
           host: ${{ vars.GERRIT_SERVER }}
           username: ${{ vars.GERRIT_SSH_USER }}
@@ -116,8 +122,10 @@ jobs:
       - name: 'Allow replication'
         run: sleep 10s
 
-  # Call the reusable merge workflow, forwarding the Nexus credential
-  # secrets it needs once the publish placeholders are replaced.
+  # Call the reusable merge workflow. A reusable workflow cannot raise
+  # its caller's permissions, and GitHub checks every nested job's grant
+  # when the run starts, so this job grants what the tag and publish
+  # jobs declare even though create_tag is false here.
   merge:
     needs: notify
     if: >-
@@ -125,44 +133,46 @@ jobs:
       && (needs.notify.result == 'success'
           || needs.notify.result == 'skipped')
     permissions:
-      contents: read
-    # REPLACE the pinned SHA below with a workflows-template release SHA
-    # (or your instantiated workflows repository's release SHA).
+      contents: write       # Declared by the (disabled) tag job
+      id-token: write       # crates.io Trusted Publishing
+      pull-requests: read   # repository-metadata-action queries PR data
+      issues: read          # grype-scan-action reads cve-bypass issues
+    # REPLACE the pinned SHA below with a rust-workflows release SHA.
     # The all-zero SHA is a non-functional placeholder, NOT a real commit.
     # yamllint disable-line rule:line-length
-    uses: lfreleng-actions/workflows-template/.github/workflows/merge.yaml@0000000000000000000000000000000000000000  # REPLACE: vX.Y.Z
+    uses: lfreleng-actions/rust-workflows/.github/workflows/merge.yaml@0000000000000000000000000000000000000000  # REPLACE: vX.Y.Z
     with:
       gerrit_refspec: ${{ inputs.GERRIT_REFSPEC }}
       gerrit_project: ${{ inputs.GERRIT_PROJECT }}
       gerrit_branch: ${{ inputs.GERRIT_BRANCH }}
       # gerrit_url falls back to the GERRIT_URL repository variable.
-    secrets:
-      OP_SERVICE_ACCOUNT_TOKEN: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN }}
-      VAULT_MAPPING_JSON: ${{ secrets.VAULT_MAPPING_JSON }}
+      create_tag: false
+      # publish_enabled: true
+      # publish_environment: 'production-merge'
 
   # Report the overall workflow conclusion back to Gerrit as a comment
   # (comment-only: merge pipelines never vote).
   report:
+    name: 'Report'
     if: always()
     needs: [notify, merge]
     runs-on: ubuntu-latest
     permissions:
-      contents: read
-      # workflow-conclusion queries the Actions API to list run jobs
-      actions: read
+      contents: read  # No repository access beyond the default
+      actions: read  # workflow-conclusion lists the run's jobs
     timeout-minutes: 5
     steps:
       - name: 'Harden runner'
         # yamllint disable-line rule:line-length
-        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411  # v2.19.4
+        uses: step-security/harden-runner@ccd8616d44fd3846e67624a50d5aad6d37bf2d25  # v2.22.1
         with:
           egress-policy: audit
       - name: 'Get conclusion'
         # yamllint disable-line rule:line-length
-        uses: im-open/workflow-conclusion@fce18569e28a9f2ed1feca1e6d4251e6a7365fdc  # v2.2.4
+        uses: im-open/workflow-conclusion@8eac7f17381a6917bc04fec3e2c92e70ebc37526  # v3.0.0
       - name: 'Report conclusion'
         # yamllint disable-line rule:line-length
-        uses: lfreleng-actions/gerrit-review-action@b26a98041c59f9a877048c320313ab13bcc19aae  # v1.0.1
+        uses: lfreleng-actions/gerrit-review-action@1e3eae766b3de755a2e87aa216cedebbaf9c8292  # v1.1.3
         with:
           host: ${{ vars.GERRIT_SERVER }}
           username: ${{ vars.GERRIT_SSH_USER }}
