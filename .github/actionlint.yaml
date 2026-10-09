@@ -4,6 +4,12 @@
 
 # Path-specific configurations.
 paths:
+  # Each lane calls the shared rust-metadata.yaml through '$/', for
+  # the reason testing.yaml gives below.
+  .github/workflows/build-test.yaml:
+    ignore:
+      # yamllint disable-line rule:line-length
+      - 'reusable workflow call "\$/\.github/workflows/rust\-metadata\.yaml" at "uses" is not following the format'
   .github/workflows/testing.yaml:
     ignore:
       # GitHub's self-repository reference ('$/', July 2026) resolves
