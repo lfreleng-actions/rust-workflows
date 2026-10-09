@@ -4,6 +4,15 @@
 
 # Path-specific configurations.
 paths:
+  # GitHub's concurrency 'queue' key (2026) keeps pending merge runs
+  # instead of replacing them; actionlint does not know it yet. Scoped
+  # to the message, so any other concurrency mistake still reports.
+  examples/merge/github.yaml:
+    ignore:
+      - 'unexpected key "queue" for "concurrency" section'
+  examples/merge/gerrit.yaml:
+    ignore:
+      - 'unexpected key "queue" for "concurrency" section'
   # Each lane calls the shared rust-metadata.yaml through '$/', for
   # the reason testing.yaml gives below.
   .github/workflows/build-test.yaml:
@@ -11,6 +20,10 @@ paths:
       # yamllint disable-line rule:line-length
       - 'reusable workflow call "\$/\.github/workflows/rust\-metadata\.yaml" at "uses" is not following the format'
   .github/workflows/build-test-release.yaml:
+    ignore:
+      # yamllint disable-line rule:line-length
+      - 'reusable workflow call "\$/\.github/workflows/rust\-metadata\.yaml" at "uses" is not following the format'
+  .github/workflows/merge.yaml:
     ignore:
       # yamllint disable-line rule:line-length
       - 'reusable workflow call "\$/\.github/workflows/rust\-metadata\.yaml" at "uses" is not following the format'
