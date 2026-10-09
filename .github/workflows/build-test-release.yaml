@@ -2,25 +2,36 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: 2026 The Linux Foundation
 
-# Reusable build/test/release pipeline SKELETON (Model A: tag-driven).
+# Reusable Rust build/test/release pipeline: the release lane (Model A).
 #
-# Reproduces the canonical Linux Foundation release pipeline shape. The
-# repository-metadata job runs in parallel as an informational step.
-# After build the audit jobs in { } run in parallel; the tests then gate
-# on ALL of them (gating inversion: on releases the audits gate the
-# expensive test matrix), and publishing runs at the end:
-#   tag-validate -> build -> { audit | sbom -> grype } -> tests
-#     -> attach-artefacts -> promote-release
+# Runs on a release tag push. The repository-metadata job runs in
+# parallel as an informational step. On a release the audits gate the
+# test matrix, and nothing reaches publication past a failing gate
+# (-> denotes sequence):
+#   tag-validate -> rust-metadata -> build
+#     -> { audit | sbom -> grype } -> tests
+#     -> crate-verify -> attach-artefacts -> publish -> promote-release
 #
-# Steps marked "# TEMPLATE:" are placeholders. When instantiating this
-# template for a language, replace them with the real build/test/audit/
-# SBOM actions; the tag validation, release plumbing, harden-runner
-# wiring, dual checkout and Grype scan are generic and transfer as-is.
+# crate-verify dry-runs the publish: it checks the tag against every
+# crate version, compiles the packaged crates and records their
+# digests. attach-artefacts drafts the GitHub release and attaches the
+# crates (byte-identical to the verified ones), binaries, SBOMs and a
+# SHA256SUMS file, with provenance attestations and Sigstore bundles.
+# publish, when enabled, uploads the verified crates to crates.io
+# through Trusted Publishing. promote-release publishes the draft last,
+# so a failed upload leaves a draft rather than a release without its
+# crates.
+#
+# crates.io matches a trusted publisher against the OIDC workflow_ref
+# claim, which names the CALLER's workflow file, so the publish job
+# lives here and the trusted publisher names the caller's file and
+# publish_environment (docs/BRIEF.md Q9).
 #
 # Call this from a thin caller workflow on a tag push; see
-# examples/build-test-release/ for both a plain GitHub-native caller and
-# a Gerrit-wrapped caller.
-name: '[R] Build/Test/Release (Template)'
+# examples/build-test-release/ for both caller forms. Keep the
+# template's release.yaml out of a project that calls this lane: two
+# workflows acting on one tag push race each other.
+name: '[R] Rust Build/Test/Release'
 
 # yamllint disable-line rule:truthy
 on:
@@ -33,70 +44,316 @@ on:
         type: string
         default: ''
       ref:
-        description: 'Branch/tag/SHA to check out (empty = default branch)'
+        description: >-
+          Tag or SHA to check out (empty = event ref). It must name the
+          validated tag's commit: every job builds that commit
         required: false
         type: string
         default: ''
 
-      # --- Project layout ---
+      # --- Project selection ---
       path_prefix:
-        description: 'Path to the project root directory'
+        description: 'Directory holding the project'
         required: false
         type: string
         default: '.'
-
-      # --- Tests ---
-      test_permit_fail:
-        description: 'Permit test failures without failing the workflow'
+      manifest_path:
+        description: 'Cargo.toml to act on, relative to path_prefix'
+        required: false
+        type: string
+        default: 'Cargo.toml'
+      workspace:
+        description: >-
+          Act on every workspace member (--workspace), and publish every
+          member whose 'publish' setting admits crates.io
+        required: false
+        type: boolean
+        default: true
+      packages:
+        description: 'Whitespace-separated packages; replaces workspace'
+        required: false
+        type: string
+        default: ''
+      exclude:
+        description: 'Members to skip; needs workspace and no packages'
+        required: false
+        type: string
+        default: ''
+      features:
+        description: 'Features to enable, separated by spaces or commas'
+        required: false
+        type: string
+        default: ''
+      all_features:
+        description: 'Enable every feature (--all-features)'
+        required: false
+        type: boolean
+        default: false
+      no_default_features:
+        description: 'Disable default features (--no-default-features)'
         required: false
         type: boolean
         default: false
 
+      # --- Toolchain and environment ---
+      toolchain:
+        description: >-
+          Toolchain for every job. Empty uses the project's toolchain
+          file, or stable without one. A moving channel resolves to an
+          exact release once per run.
+        required: false
+        type: string
+        default: ''
+      lockfile_required:
+        description: >-
+          Fail when the project commits no Cargo.lock. Publishing
+          packages with --locked, so a release needs the lockfile.
+        required: false
+        type: boolean
+        default: true
+      setup_script:
+        description: >-
+          Committed script, relative to path_prefix, run with bash
+          before cargo in the jobs that compile (native libraries)
+        required: false
+        type: string
+        default: ''
+      runners:
+        description: >-
+          JSON array of {runner, arch} objects; build and tests run once
+          per entry, and each entry's binaries are attached
+        required: false
+        type: string
+        default: '[{"runner": "ubuntu-latest", "arch": "x64"}]'
+
+      # --- Build ---
+      target:
+        description: 'Target triple to build for; empty builds for the host'
+        required: false
+        type: string
+        default: ''
+      profile:
+        description: 'Cargo profile: dev, release or a custom profile'
+        required: false
+        type: string
+        default: 'release'
+      cargo_args:
+        description: "Extra 'cargo build' arguments, split on whitespace"
+        required: false
+        type: string
+        default: ''
+      binaries:
+        description: 'Attach the built binaries to the release'
+        required: false
+        type: boolean
+        default: false
+      auditable:
+        description: "Build binaries with 'cargo auditable'; needs binaries"
+        required: false
+        type: boolean
+        default: false
+      build_timeout_minutes:
+        description: 'Timeout for each build job'
+        required: false
+        type: number
+        default: 20
+
+      # --- Tests ---
+      tests_enabled:
+        description: 'Run the test jobs (set false to skip)'
+        required: false
+        type: boolean
+        default: true
+      test_matrix:
+        description: >-
+          'project' tests the project toolchain; 'msrv' adds the declared
+          rust-version; 'full' adds recent stable minors and stable.
+        required: false
+        type: string
+        default: 'msrv'
+      test_runner:
+        description: "'cargo' (cargo test) or 'nextest' (cargo nextest run)"
+        required: false
+        type: string
+        default: 'cargo'
+      test_args:
+        description: 'Extra test runner arguments, split on whitespace'
+        required: false
+        type: string
+        default: ''
+      doc_tests:
+        description: 'Run doc tests'
+        required: false
+        type: boolean
+        default: true
+      coverage:
+        description: 'Measure coverage with cargo-llvm-cov (project leg)'
+        required: false
+        type: boolean
+        default: false
+      test_permit_fail:
+        description: 'Permit test failures without failing the job'
+        required: false
+        type: boolean
+        default: false
+      test_timeout_minutes:
+        description: 'Timeout for each test job'
+        required: false
+        type: number
+        default: 20
+
       # --- Audit ---
       audit_enabled:
-        description: 'Run the dependency audit job (set false to skip)'
+        description: 'Run the cargo-audit job (set false to skip)'
         required: false
         type: boolean
         default: true
       audit_permit_fail:
-        description: 'Permit dependency audit failures (the NO_BLOCK pattern)'
+        description: 'Permit audit failures without failing the job'
         required: false
         type: boolean
         default: false
+      audit_ignore_vulns:
+        description: 'RUSTSEC advisory IDs to ignore, whitespace-separated'
+        required: false
+        type: string
+        default: ''
+      audit_allow_list_path:
+        description: 'File of RUSTSEC IDs to ignore, relative to path_prefix'
+        required: false
+        type: string
+        default: ''
+      deny_enabled:
+        description: 'Also run cargo-deny in the audit job'
+        required: false
+        type: boolean
+        default: false
+      deny_checks:
+        description: 'cargo-deny checks: advisories bans licenses sources'
+        required: false
+        type: string
+        default: 'advisories bans licenses sources'
+      audit_timeout_minutes:
+        description: 'Timeout for the audit, SBOM and Grype jobs'
+        required: false
+        type: number
+        default: 10
 
-      # --- SBOM ---
+      # --- SBOM and Grype ---
       sbom_enabled:
         description: >-
-          Generate an SBOM (set false to skip). The Grype job scans the
-          SBOM, so skipping generation leaves it nothing to scan and it
-          is skipped too. To keep the SBOM but drop the scan, use
-          grype_enabled instead.
+          Generate an SBOM and attach it to the release (set false to
+          skip). Skipping it skips the Grype scan too.
         required: false
         type: boolean
         default: true
-
-      # --- Grype scan ---
+      sbom_format:
+        description: "SBOM output format: 'json', 'xml' or 'both'"
+        required: false
+        type: string
+        default: 'both'
       grype_enabled:
-        description: >-
-          Run the Grype vulnerability scan over the generated SBOM (set
-          false to skip). Decoupling is one-way: disabling the scan
-          keeps the SBOM, but disabling the SBOM also stops the scan,
-          which has nothing to read.
+        description: 'Run the Grype vulnerability scan over the SBOM'
         required: false
         type: boolean
         default: true
       grype_fail_on:
-        description: 'Minimum severity that fails the Grype scan'
+        description: >-
+          Lowest severity that fails the scan: negligible, low, medium,
+          high or critical; 'none' reports without gating
         required: false
         type: string
         default: 'medium'
       grype_permit_fail:
         description: >-
-          Permit Grype findings without failing the job. When false, falls
-          back to the NO_BLOCK_AUDIT_FAIL repository variable at runtime.
+          Report Grype findings without failing the job. When false,
+          falls back to the NO_BLOCK_AUDIT_FAIL repository variable.
         required: false
         type: boolean
         default: false
+      grype_only_fixed:
+        description: 'Report only vulnerabilities that have a fix'
+        required: false
+        type: boolean
+        default: false
+
+      # --- Tag policy ---
+      tag_enforce_increment:
+        description: 'Require the tag to sort above every earlier tag'
+        required: false
+        type: boolean
+        default: false
+      tag_require_branch:
+        description: 'Require the tag on a commit this branch reaches'
+        required: false
+        type: string
+        default: ''
+      tag_require_latest:
+        description: 'Require the tag on the tip of tag_require_branch'
+        required: false
+        type: boolean
+        default: false
+
+      # --- Release ---
+      attestations:
+        description: >-
+          Attest build provenance for every release asset. Needs
+          id-token and attestations write permissions in the caller.
+        required: false
+        type: boolean
+        default: true
+      sigstore_sign:
+        description: >-
+          Sign every release asset with Sigstore (keyless), attaching a
+          .sigstore.json bundle beside each. Needs id-token: write.
+        required: false
+        type: boolean
+        default: true
+      semver_checks:
+        description: >-
+          Run cargo-semver-checks against the latest earlier crates.io
+          release before publishing
+        required: false
+        type: boolean
+        default: false
+      publish_enabled:
+        description: >-
+          Publish the verified crates to crates.io through Trusted
+          Publishing. Off by default: register the trusted publisher
+          first.
+        required: false
+        type: boolean
+        default: false
+      publish_environment:
+        description: >-
+          Environment the publish job runs in; the crates.io trusted
+          publisher must name it. Restrict it to release tags.
+        required: false
+        type: string
+        default: 'production'
+      dry_run:
+        description: >-
+          Rehearse the release: validate and verify everything, but
+          draft, upload, attest, sign, publish and promote nothing.
+          With dry_run, 'tag' names the tag to rehearse.
+        required: false
+        type: boolean
+        default: false
+      tag:
+        description: 'Tag to rehearse with dry_run; empty uses the pushed tag'
+        required: false
+        type: string
+        default: ''
+
+      # --- Artefacts ---
+      artefact_suffix:
+        description: >-
+          Suffix for every artefact this run uploads, such as '-core',
+          so several calls in one workflow run cannot clash: empty, or
+          '-' and up to 64 letters, digits, '.', '_' or '-'
+        required: false
+        type: string
+        default: ''
 
       # --- Runner hardening ---
       harden_runner_egress:
@@ -109,7 +366,7 @@ on:
         required: false
         type: string
         # yamllint disable-line rule:line-length
-        default: 'lfreleng-actions//.github/harden-runner/lfreleng-actions/allow_list.txt@f0f76ac22f342c9a788ebcabe584e68a79cc2e83'  # v0.16.0
+        default: 'lfreleng-actions//.github/harden-runner/lfreleng-actions/allow_list.txt@93962991c9e4cc04d77d81e619475c868a226277'  # v0.17.0
 
       # --- Gerrit-aware checkout (empty unless dispatched via Gerrit) ---
       gerrit_refspec:
@@ -135,31 +392,22 @@ on:
         type: string
         default: ''
 
-      # --- Release-only inputs ---
-      attestations:
-        description: >-
-          Generate build provenance attestations. Placeholder wiring in
-          this template: pass it to your build action (or enable the
-          commented actions/attest example in the build job) when
-          instantiating. Keep it toggleable for air-gapped or
-          Gerrit-mirrored consumers that cannot reach Sigstore.
-        required: false
-        type: boolean
-        default: true
-      sigstore_sign:
-        description: >-
-          Sign build artefacts with Sigstore (keyless/OIDC). Placeholder
-          wiring in this template: pass it to your build action when
-          instantiating. Keep it toggleable for air-gapped or
-          Gerrit-mirrored consumers that cannot reach Sigstore.
-        required: false
-        type: boolean
-        default: true
-
     outputs:
       tag:
-        description: 'Validated release tag/version string'
+        description: 'Validated release tag'
         value: ${{ jobs.tag-validate.outputs.tag }}
+      crate_name:
+        description: 'Verified crate names, space-separated, publish order'
+        value: ${{ jobs.crate-verify.outputs.crate_name }}
+      crate_version:
+        description: 'Crate version; several crates: JSON name to version'
+        value: ${{ jobs.crate-verify.outputs.crate_version }}
+      publish_status:
+        description: "'published', 'skipped' or 'failed'; empty unpublished"
+        value: ${{ jobs.publish.outputs.publish_status }}
+      release_url:
+        description: 'URL of the promoted GitHub release'
+        value: ${{ jobs.promote-release.outputs.release_url }}
 
 permissions: {}
 
@@ -174,13 +422,11 @@ env:
 
 jobs:
   gerrit-validate:
-    name: 'Validate Gerrit Inputs'
-    # Fails fast with a clear message when gerrit_refspec is set without
-    # the project/branch the Gerrit checkout path also requires. The
-    # build-chain root job depends on this, so invalid Gerrit inputs stop
-    # the pipeline early and cleanly. This job always runs (only the
-    # validation step is conditional), so gating dependents on it does
-    # not trip GitHub's "skipped need skips dependents" behaviour.
+    name: 'Validate Inputs'
+    # Fails fast on inputs the jobs would otherwise reject one by one.
+    # This job always runs (only its steps are conditional), so gating
+    # dependents on it does not trip GitHub's "skipped need skips
+    # dependents" behaviour.
     runs-on: ubuntu-latest
     permissions: {}
     timeout-minutes: 2
@@ -194,9 +440,7 @@ jobs:
           # yamllint disable-line rule:line-length
           GERRIT_URL: ${{ inputs.gerrit_url != '' && inputs.gerrit_url || vars.GERRIT_URL }}
         run: |
-          # gerrit_refspec is set, so the Gerrit checkout path runs and
-          # also requires gerrit_project, gerrit_branch and a resolvable
-          # Gerrit URL (the gerrit_url input or the GERRIT_URL variable).
+          # Require Gerrit project, branch and URL
           missing=''
           if [ -z "${GERRIT_PROJECT}" ]; then
             missing="${missing} gerrit_project"
@@ -213,22 +457,76 @@ jobs:
           fi
           echo "Gerrit inputs validated ✅"
 
+      - name: 'Check the release inputs'
+        shell: bash
+        env:
+          TEST_RUNNER: ${{ inputs.test_runner }}
+          ARTEFACT_SUFFIX: ${{ inputs.artefact_suffix }}
+          SBOM_FORMAT: ${{ inputs.sbom_format }}
+          GRYPE_FAIL_ON: ${{ inputs.grype_fail_on }}
+          DRY_RUN: ${{ inputs.dry_run }}
+          TAG: ${{ inputs.tag }}
+          REF_TYPE: ${{ github.ref_type }}
+          PUBLISH_ENABLED: ${{ inputs.publish_enabled }}
+          PUBLISH_ENVIRONMENT: ${{ inputs.publish_environment }}
+          TAG_REQUIRE_LATEST: ${{ inputs.tag_require_latest }}
+          TAG_REQUIRE_BRANCH: ${{ inputs.tag_require_branch }}
+        run: |
+          # Check the release inputs
+          failed=0
+          error() { echo "::error::$*"; failed=1; }
+          check() {
+            local name="$1" value="$2" allowed=" $3 "
+            case "$allowed" in
+              *" $value "*) ;;
+              *) error "$name: expected one of:$allowed" ;;
+            esac
+          }
+          check test_runner "$TEST_RUNNER" 'cargo nextest'
+          check sbom_format "$SBOM_FORMAT" 'json xml both'
+          check grype_fail_on "$GRYPE_FAIL_ON" \
+            'negligible low medium high critical none'
+          if [ "$DRY_RUN" = 'true' ]; then
+            [ -n "$TAG" ] || error "dry_run needs the tag input"
+          else
+            [ -z "$TAG" ] || error "tag: set it only with dry_run"
+            [ "$REF_TYPE" = 'tag' ] \
+              || error "Call this workflow on a tag push"
+          fi
+          if [ "$PUBLISH_ENABLED" = 'true' ] \
+            && [ -z "$PUBLISH_ENVIRONMENT" ]; then
+            error "publish_enabled needs publish_environment: crates.io" \
+              "trusted publishers should name an environment"
+          fi
+          if [ "$TAG_REQUIRE_LATEST" = 'true' ] \
+            && [ -z "$TAG_REQUIRE_BRANCH" ]; then
+            error "tag_require_latest needs tag_require_branch"
+          fi
+          if ! [[ "$ARTEFACT_SUFFIX" =~ ^(-[A-Za-z0-9._-]{1,64})?$ ]]; then
+            echo "::error::artefact_suffix: expected '' or '-' and up to" \
+              "64 of A-Z a-z 0-9 . _ -"
+            failed=1
+          fi
+          exit "$failed"
+
   repository-metadata:
     name: 'Repository Metadata'
     needs: gerrit-validate
     runs-on: ubuntu-latest
     permissions:
       contents: read
+      pull-requests: read  # repository-metadata-action queries PR data
     timeout-minutes: 5
     steps:
       - name: 'Load egress allow-list'
         # yamllint disable-line rule:line-length
-        uses: lfreleng-actions/harden-runner-block-action@a32eb064a1188f6b0f15d2c0c0381efe54b0dd22  # v0.12.2
+        uses: lfreleng-actions/harden-runner-block-action@51ef68401547a8b648275129b9a21544612596d5  # v0.13.1
         with:
           config: ${{ inputs.harden_runner_allowlist }}
+          allow_list_summary: 'false'
       - name: 'Harden runner'
         # yamllint disable-line rule:line-length
-        uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1  # v2.21.1
+        uses: step-security/harden-runner@ccd8616d44fd3846e67624a50d5aad6d37bf2d25  # v2.22.1
         with:
           # yamllint disable-line rule:line-length
           egress-policy: ${{ inputs.harden_runner_egress == 'audit' && 'audit' || 'block' }}
@@ -238,7 +536,7 @@ jobs:
       - name: 'Checkout Gerrit change'
         if: inputs.gerrit_refspec != ''
         # yamllint disable-line rule:line-length
-        uses: lfreleng-actions/checkout-gerrit-change-action@298f53bbbc1d5f9e54df9feb484d110dc2b33197  # v1.1.0
+        uses: lfreleng-actions/checkout-gerrit-change-action@35e98c8043ec411611e464e296bcfb441a5c5093  # v1.1.2
         with:
           gerrit-refspec: ${{ inputs.gerrit_refspec }}
           gerrit-project: ${{ inputs.gerrit_project }}
@@ -260,7 +558,7 @@ jobs:
       - name: 'Gather repository metadata'
         id: repo-metadata
         # yamllint disable-line rule:line-length
-        uses: lfreleng-actions/repository-metadata-action@847400e0d0b34cc88a572fa9575accd80401b796  # v0.3.1
+        uses: lfreleng-actions/repository-metadata-action@b2078d32ca207a0e110b2157a95271a35688c8e7  # v0.3.2
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           github_summary: 'true'
@@ -269,43 +567,31 @@ jobs:
           artifact_formats: 'json'
 
   tag-validate:
-    name: 'Validate Tag Push'
+    name: 'Validate Tag'
     needs: gerrit-validate
-    runs-on: 'ubuntu-latest'
+    runs-on: ubuntu-latest
     permissions:
-      contents: write  # Needed to draft a release
+      contents: read
     timeout-minutes: 5
     outputs:
       tag: ${{ steps.tag-validate.outputs.tag_name }}
+      sha: ${{ steps.commit.outputs.sha }}
     steps:
       - name: 'Load egress allow-list'
         # yamllint disable-line rule:line-length
-        uses: lfreleng-actions/harden-runner-block-action@a32eb064a1188f6b0f15d2c0c0381efe54b0dd22  # v0.12.2
+        uses: lfreleng-actions/harden-runner-block-action@51ef68401547a8b648275129b9a21544612596d5  # v0.13.1
         with:
           config: ${{ inputs.harden_runner_allowlist }}
       - name: 'Harden runner'
         # yamllint disable-line rule:line-length
-        uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1  # v2.21.1
+        uses: step-security/harden-runner@ccd8616d44fd3846e67624a50d5aad6d37bf2d25  # v2.22.1
         with:
           # yamllint disable-line rule:line-length
           egress-policy: ${{ inputs.harden_runner_egress == 'audit' && 'audit' || 'block' }}
           allowed-endpoints: >
             ${{ env.CONNECTION_ALLOW_LIST }}
 
-      - name: 'Checkout Gerrit change'
-        if: inputs.gerrit_refspec != ''
-        # yamllint disable-line rule:line-length
-        uses: lfreleng-actions/checkout-gerrit-change-action@298f53bbbc1d5f9e54df9feb484d110dc2b33197  # v1.1.0
-        with:
-          gerrit-refspec: ${{ inputs.gerrit_refspec }}
-          gerrit-project: ${{ inputs.gerrit_project }}
-          # yamllint disable-line rule:line-length
-          gerrit-url: ${{ inputs.gerrit_url != '' && inputs.gerrit_url || vars.GERRIT_URL }}
-          delay: '0s'
-          repository: ${{ inputs.repository || github.repository }}
-          ref: refs/heads/${{ inputs.gerrit_branch }}
-      - name: 'Checkout repository'
-        if: inputs.gerrit_refspec == ''
+      - name: 'Checkout repository with tags'
         # yamllint disable-line rule:line-length
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
@@ -315,66 +601,139 @@ jobs:
           fetch-tags: true
           persist-credentials: false
 
-      - name: 'Verify pushed tag'
+      # The organisation's release checks: a signed SemVer release tag,
+      # with the optional ordering and branch policy on top. A pushed
+      # tag is read from GITHUB_REF; a rehearsal names its tag.
+      - name: 'Verify the tag'
         id: 'tag-validate'
         # yamllint disable-line rule:line-length
         uses: lfreleng-actions/tag-validate-action@63470621b8ebc5c4fc86ebb616727dd0a7285dd9  # v1.1.7
         with:
+          # yamllint disable-line rule:line-length
+          tag_location: ${{ inputs.dry_run && format('{0}/{1}', inputs.repository || github.repository, inputs.tag) || '' }}
           token: ${{ secrets.GITHUB_TOKEN }}
           require_type: 'semver'
           reject_development: 'true'
           require_github: 'true'
           # yamllint disable-line rule:line-length
           require_signed: 'ssh,gpg-unverifiable'  # Cannot verify GPG without key
+          enforce_increment: ${{ inputs.tag_enforce_increment }}
+          require_branch: ${{ inputs.tag_require_branch }}
+          require_latest: ${{ inputs.tag_require_latest }}
 
-      - name: 'Ensure draft release exists'
-        id: 'ensure-release'
+      # Every later job builds this commit: the one the validated tag
+      # names. A 'ref' naming another commit fails here, so a caller
+      # can't validate one tag and release some other source.
+      - name: 'Resolve the tagged commit'
+        id: commit
+        shell: bash
+        env:
+          TAG: ${{ steps.tag-validate.outputs.tag_name }}
+          REF: ${{ inputs.ref }}
+        run: |
+          # Resolve the tagged commit
+          set -euo pipefail
+          sha="$(git rev-parse --verify --quiet "refs/tags/$TAG^{commit}")" \
+            || { echo "::error::The checkout has no tag $TAG"; exit 1; }
+          if [ -n "$REF" ] && [ "$(git rev-parse HEAD)" != "$sha" ]; then
+            echo "::error::ref names another commit than tag $TAG"
+            exit 1
+          fi
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          echo "Releasing $TAG from $sha"
+
+      # Immutable releases cannot gain assets once published, so a
+      # published release for this tag stops the run before the build.
+      - name: 'Check for a published release'
+        if: ${{ !inputs.dry_run }}
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPOSITORY: ${{ inputs.repository || github.repository }}
           TAG: ${{ steps.tag-validate.outputs.tag_name }}
         run: |
-          # Ensure draft release exists
-          # Check if release exists and get its draft status
-          if RELEASE_INFO=$(gh release view "$TAG" \
-            --json isDraft 2>/dev/null); then
-            IS_DRAFT=$(echo "$RELEASE_INFO" | jq -r '.isDraft')
-            if [ "$IS_DRAFT" = "true" ]; then
-              echo "Draft release for tag $TAG already exists"
-            else
-              echo "::error::A published release already exists for $TAG;" \
-                "delete or recreate it as a draft, then re-run."
-              exit 1
-            fi
-          else
-            echo "Creating draft release for tag $TAG"
-            gh release create "$TAG" \
-              --draft \
-              --title "Release $TAG" \
-              --notes "Automated release for $TAG"
+          # Check for a published release
+          if draft="$(gh release view "$TAG" --repo "$REPOSITORY" \
+              --json isDraft --jq .isDraft 2> /dev/null)" \
+            && [ "$draft" = 'false' ]; then
+            echo "::error::$TAG already has a published release. Tag a" \
+              "new version, or delete the release if it was a mistake."
+            exit 1
           fi
+          echo "No published release for $TAG ✅"
+
+  rust-metadata:
+    name: 'Rust Metadata'
+    needs: tag-validate
+    permissions:
+      contents: read
+    uses: $/.github/workflows/rust-metadata.yaml
+    with:
+      repository: ${{ inputs.repository }}
+      ref: ${{ needs.tag-validate.outputs.sha }}
+      path_prefix: ${{ inputs.path_prefix }}
+      manifest_path: ${{ inputs.manifest_path }}
+      workspace: ${{ inputs.workspace }}
+      packages: ${{ inputs.packages }}
+      exclude: ${{ inputs.exclude }}
+      toolchain: ${{ inputs.toolchain }}
+      test_matrix: ${{ inputs.test_matrix }}
+      runners: ${{ inputs.runners }}
+      lockfile_required: ${{ inputs.lockfile_required }}
+      harden_runner_egress: ${{ inputs.harden_runner_egress }}
+      harden_runner_allowlist: ${{ inputs.harden_runner_allowlist }}
+      # yamllint disable-line rule:line-length
+      gerrit_refspec: ${{ inputs.gerrit_refspec != '' && needs.tag-validate.outputs.sha || '' }}
+      gerrit_project: ${{ inputs.gerrit_project }}
+      gerrit_branch: ${{ inputs.gerrit_branch }}
+      gerrit_url: ${{ inputs.gerrit_url }}
+      artefact_suffix: ${{ inputs.artefact_suffix }}
 
   build:
-    name: 'Build'
-    needs: 'tag-validate'
-    runs-on: 'ubuntu-latest'
-    outputs:
-      artefact_name: ${{ steps.build.outputs.artefact_name }}
-      artefact_path: ${{ steps.build.outputs.artefact_path }}
+    name: 'Build (${{ matrix.platform.arch }})'
+    needs:
+      - tag-validate
+      - rust-metadata
+    strategy:
+      fail-fast: true
+      matrix:
+        platform: ${{ fromJSON(needs.rust-metadata.outputs.runners) }}
+    runs-on: ${{ matrix.platform.runner }}
     permissions:
       contents: read
-      id-token: write       # Needed for attestations
-      attestations: write   # Needed for attestations
-    timeout-minutes: 12
+    timeout-minutes: ${{ inputs.build_timeout_minutes }}
     steps:
+      # Fail before compiling anything when the tag names a version the
+      # crates do not carry; crate-verify repeats the check in full.
+      - name: 'Check the tag against the crate versions'
+        shell: bash
+        env:
+          TAG: ${{ needs.tag-validate.outputs.tag }}
+          # yamllint disable-line rule:line-length
+          PUBLISHABLE: ${{ needs.rust-metadata.outputs.publishable_packages }}
+        run: |
+          # Check the tag against the crate versions
+          set -euo pipefail
+          version="${TAG#v}"
+          mismatched="$(jq -r --arg v "$version" \
+            '[.[] | select(.version != $v) | .name + " " + .version]
+             | join(", ")' <<< "$PUBLISHABLE")"
+          if [ -n "$mismatched" ]; then
+            echo "::error::Tag $TAG does not match: $mismatched." \
+              "Tag the commit that sets version $version."
+            exit 1
+          fi
+          echo "Tag $TAG matches every publishable crate ✅"
+
       - name: 'Load egress allow-list'
         # yamllint disable-line rule:line-length
-        uses: lfreleng-actions/harden-runner-block-action@a32eb064a1188f6b0f15d2c0c0381efe54b0dd22  # v0.12.2
+        uses: lfreleng-actions/harden-runner-block-action@51ef68401547a8b648275129b9a21544612596d5  # v0.13.1
         with:
           config: ${{ inputs.harden_runner_allowlist }}
+          allow_list_summary: 'false'
       - name: 'Harden runner'
         # yamllint disable-line rule:line-length
-        uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1  # v2.21.1
+        uses: step-security/harden-runner@ccd8616d44fd3846e67624a50d5aad6d37bf2d25  # v2.22.1
         with:
           # yamllint disable-line rule:line-length
           egress-policy: ${{ inputs.harden_runner_egress == 'audit' && 'audit' || 'block' }}
@@ -384,9 +743,9 @@ jobs:
       - name: 'Checkout Gerrit change'
         if: inputs.gerrit_refspec != ''
         # yamllint disable-line rule:line-length
-        uses: lfreleng-actions/checkout-gerrit-change-action@298f53bbbc1d5f9e54df9feb484d110dc2b33197  # v1.1.0
+        uses: lfreleng-actions/checkout-gerrit-change-action@35e98c8043ec411611e464e296bcfb441a5c5093  # v1.1.2
         with:
-          gerrit-refspec: ${{ inputs.gerrit_refspec }}
+          gerrit-refspec: ${{ needs.tag-validate.outputs.sha }}
           gerrit-project: ${{ inputs.gerrit_project }}
           # yamllint disable-line rule:line-length
           gerrit-url: ${{ inputs.gerrit_url != '' && inputs.gerrit_url || vars.GERRIT_URL }}
@@ -399,92 +758,71 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           repository: ${{ inputs.repository || github.repository }}
-          ref: ${{ inputs.ref }}
+          ref: ${{ needs.tag-validate.outputs.sha }}
           persist-credentials: false
 
-      # TEMPLATE: Replace this placeholder with your language build
-      # action, passing the sigstore_sign/attestations inputs through
-      # where the action supports them, e.g.:
-      #   - name: 'Build project'
-      #     id: build
-      #     uses: lfreleng-actions/<lang>-build-action@<SHA>  # vX.Y.Z
-      #     with:
-      #       path_prefix: ${{ inputs.path_prefix }}
-      #       sigstore_sign: ${{ inputs.sigstore_sign }}
-      #       attestations: ${{ inputs.attestations }}
-      - name: 'Build project (placeholder)'
-        id: build
-        shell: bash
-        env:
-          PATH_PREFIX: ${{ inputs.path_prefix }}
-        run: |
-          # TEMPLATE: placeholder build step; produces a trivial text
-          # artefact so the artifact/release plumbing can be exercised.
-          cd "${PATH_PREFIX}"
-          mkdir -p dist
-          {
-            echo "workflows-template placeholder build artefact"
-            echo "repository: ${GITHUB_REPOSITORY}"
-            echo "ref: ${GITHUB_REF}"
-            echo "sha: ${GITHUB_SHA}"
-            echo "run_id: ${GITHUB_RUN_ID}"
-          } > dist/template-artefact.txt
-          echo "artefact_name=template-build" >> "$GITHUB_OUTPUT"
-          echo "artefact_path=${PATH_PREFIX}/dist" >> "$GITHUB_OUTPUT"
-
-      # TEMPLATE: When your build action does NOT handle attestations
-      # itself, uncomment this step to generate SLSA build provenance
-      # for real artefacts (verifiable with `gh attestation verify`).
-      # It ships commented out because attesting the trivial placeholder
-      # artefact provides no value.
-      #
-      # Use actions/attest, not actions/attest-build-provenance: as of
-      # v4 the latter is a thin wrapper that forwards its inputs to the
-      # former, and GitHub directs new implementations at actions/attest
-      # directly. With no predicate supplied it emits SLSA build
-      # provenance by default, so the step stays this short.
-      #
-      # The wrapper is not quite empty: it also sets NODE_OPTIONS to
-      # raise node's 16KB header limit, which overflows when pushing
-      # attestations to some OCI registries. Nothing below pushes to a
-      # registry, but if you add `push-to-registry: true`, carry the
-      # setting across yourself:
-      #     env:
-      #       NODE_OPTIONS: '--max-http-header-size=32768'
-      #
-      #   - name: 'Attest build provenance'
-      #     if: inputs.attestations
-      # yamllint disable-line rule:line-length
-      #     uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6  # v4.2.2
-      #     with:
-      #       subject-path: 'dist/*'
-
-      - name: 'Upload build artefact'
+      - name: 'Restore the resolved lockfile'
+        if: needs.rust-metadata.outputs.lockfile_generated == 'true'
         # yamllint disable-line rule:line-length
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8.0.2
         with:
-          name: ${{ steps.build.outputs.artefact_name }}
-          path: ${{ steps.build.outputs.artefact_path }}
-          if-no-files-found: error
+          name: ${{ needs.rust-metadata.outputs.lockfile_artefact }}
+          path: ${{ needs.rust-metadata.outputs.lockfile_dir }}
+
+      # The first platform packages the crates; attach-artefacts checks
+      # them against the digests crate-verify records.
+      - name: 'Build'
+        id: build
+        # yamllint disable-line rule:line-length
+        uses: lfreleng-actions/rust-build-action@b1d7fdb06b77e4f6f83a0c9aa4369749b7dbfc1e  # v0.0.2
+        with:
+          path_prefix: ${{ inputs.path_prefix }}
+          manifest_path: ${{ inputs.manifest_path }}
+          workspace: ${{ inputs.workspace }}
+          packages: ${{ inputs.packages }}
+          exclude: ${{ inputs.exclude }}
+          features: ${{ inputs.features }}
+          all_features: ${{ inputs.all_features }}
+          no_default_features: ${{ inputs.no_default_features }}
+          toolchain: ${{ needs.rust-metadata.outputs.toolchain }}
+          # yamllint disable-line rule:line-length
+          toolchain_components: ${{ needs.rust-metadata.outputs.toolchain_components }}
+          # yamllint disable-line rule:line-length
+          toolchain_targets: ${{ needs.rust-metadata.outputs.toolchain_targets }}
+          lockfile_required: ${{ inputs.lockfile_required }}
+          setup_script: ${{ inputs.setup_script }}
+          target: ${{ inputs.target }}
+          profile: ${{ inputs.profile }}
+          cargo_args: ${{ inputs.cargo_args }}
+          binaries: ${{ inputs.binaries }}
+          auditable: ${{ inputs.auditable }}
+          # yamllint disable-line rule:line-length
+          package_crates: ${{ strategy.job-index == 0 && needs.rust-metadata.outputs.publishable_count != '0' }}
+          # yamllint disable-line rule:line-length
+          artefact_name: rust-build-${{ matrix.platform.arch }}${{ inputs.artefact_suffix }}
 
   audit:
-    name: 'Audit'
-    runs-on: ubuntu-latest
-    needs: 'build'
+    name: 'Audit Dependencies'
+    needs:
+      - tag-validate
+      - rust-metadata
+      - build
     # yamllint disable-line rule:line-length
     if: ${{ !cancelled() && needs.build.result == 'success' && inputs.audit_enabled }}
+    runs-on: ubuntu-latest
     permissions:
       contents: read
-    timeout-minutes: 10
+    timeout-minutes: ${{ inputs.audit_timeout_minutes }}
     steps:
       - name: 'Load egress allow-list'
         # yamllint disable-line rule:line-length
-        uses: lfreleng-actions/harden-runner-block-action@a32eb064a1188f6b0f15d2c0c0381efe54b0dd22  # v0.12.2
+        uses: lfreleng-actions/harden-runner-block-action@51ef68401547a8b648275129b9a21544612596d5  # v0.13.1
         with:
           config: ${{ inputs.harden_runner_allowlist }}
+          allow_list_summary: 'false'
       - name: 'Harden runner'
         # yamllint disable-line rule:line-length
-        uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1  # v2.21.1
+        uses: step-security/harden-runner@ccd8616d44fd3846e67624a50d5aad6d37bf2d25  # v2.22.1
         with:
           # yamllint disable-line rule:line-length
           egress-policy: ${{ inputs.harden_runner_egress == 'audit' && 'audit' || 'block' }}
@@ -494,9 +832,9 @@ jobs:
       - name: 'Checkout Gerrit change'
         if: inputs.gerrit_refspec != ''
         # yamllint disable-line rule:line-length
-        uses: lfreleng-actions/checkout-gerrit-change-action@298f53bbbc1d5f9e54df9feb484d110dc2b33197  # v1.1.0
+        uses: lfreleng-actions/checkout-gerrit-change-action@35e98c8043ec411611e464e296bcfb441a5c5093  # v1.1.2
         with:
-          gerrit-refspec: ${{ inputs.gerrit_refspec }}
+          gerrit-refspec: ${{ needs.tag-validate.outputs.sha }}
           gerrit-project: ${{ inputs.gerrit_project }}
           # yamllint disable-line rule:line-length
           gerrit-url: ${{ inputs.gerrit_url != '' && inputs.gerrit_url || vars.GERRIT_URL }}
@@ -509,55 +847,54 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           repository: ${{ inputs.repository || github.repository }}
-          ref: ${{ inputs.ref }}
+          ref: ${{ needs.tag-validate.outputs.sha }}
           persist-credentials: false
 
-      # TEMPLATE: Replace this placeholder with your language dependency
-      # audit action, e.g.:
-      #   - name: 'Audit dependencies'
-      #     uses: lfreleng-actions/<lang>-audit-action@<SHA>  # vX.Y.Z
-      #     with:
-      #       path_prefix: ${{ inputs.path_prefix }}
-      #       permit_fail: ${{ inputs.audit_permit_fail }}
-      - name: 'Audit dependencies (placeholder)'
-        shell: bash
-        env:
-          # The NO_BLOCK/soft-fail pattern: the audit_permit_fail input
-          # (or, when unset, the NO_BLOCK_AUDIT_FAIL repository
-          # variable) disables failure propagation.
-          # yamllint disable-line rule:line-length
-          NO_BLOCK: ${{ inputs.audit_permit_fail || vars.NO_BLOCK_AUDIT_FAIL == 'true' }}
-        run: |
-          # TEMPLATE: placeholder audit step; replace with real audit.
-          status=0
-          echo "Placeholder dependency audit executed"
-          if [ "${status}" != "0" ]; then
-            if [ "${NO_BLOCK}" = "true" ]; then
-              echo "::warning::Audit failed, but failures are" \
-                "permitted so the job will not fail."
-              exit 0
-            fi
-            exit "${status}"
-          fi
+      - name: 'Restore the resolved lockfile'
+        if: needs.rust-metadata.outputs.lockfile_generated == 'true'
+        # yamllint disable-line rule:line-length
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8.0.2
+        with:
+          name: ${{ needs.rust-metadata.outputs.lockfile_artefact }}
+          path: ${{ needs.rust-metadata.outputs.lockfile_dir }}
+
+      - name: 'Audit dependencies'
+        # yamllint disable-line rule:line-length
+        uses: lfreleng-actions/rust-audit-action@fa19bd4be915071d8c6fdf3d51b95a754fa79e1d  # v0.0.1
+        with:
+          path_prefix: ${{ inputs.path_prefix }}
+          manifest_path: ${{ inputs.manifest_path }}
+          toolchain: ${{ needs.rust-metadata.outputs.toolchain }}
+          lockfile_required: ${{ inputs.lockfile_required }}
+          ignore_vulns: ${{ inputs.audit_ignore_vulns }}
+          allow_list_path: ${{ inputs.audit_allow_list_path }}
+          deny_enabled: ${{ inputs.deny_enabled }}
+          deny_checks: ${{ inputs.deny_checks }}
+          artefact_name: rust-audit-results${{ inputs.artefact_suffix }}
+          permit_fail: ${{ inputs.audit_permit_fail }}
 
   sbom:
     name: 'Generate SBOM'
-    runs-on: ubuntu-latest
-    needs: 'build'
+    needs:
+      - tag-validate
+      - rust-metadata
+      - build
     # yamllint disable-line rule:line-length
     if: ${{ !cancelled() && needs.build.result == 'success' && inputs.sbom_enabled }}
-    timeout-minutes: 10
+    runs-on: ubuntu-latest
     permissions:
       contents: read
+    timeout-minutes: ${{ inputs.audit_timeout_minutes }}
     steps:
       - name: 'Load egress allow-list'
         # yamllint disable-line rule:line-length
-        uses: lfreleng-actions/harden-runner-block-action@a32eb064a1188f6b0f15d2c0c0381efe54b0dd22  # v0.12.2
+        uses: lfreleng-actions/harden-runner-block-action@51ef68401547a8b648275129b9a21544612596d5  # v0.13.1
         with:
           config: ${{ inputs.harden_runner_allowlist }}
+          allow_list_summary: 'false'
       - name: 'Harden runner'
         # yamllint disable-line rule:line-length
-        uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1  # v2.21.1
+        uses: step-security/harden-runner@ccd8616d44fd3846e67624a50d5aad6d37bf2d25  # v2.22.1
         with:
           # yamllint disable-line rule:line-length
           egress-policy: ${{ inputs.harden_runner_egress == 'audit' && 'audit' || 'block' }}
@@ -567,9 +904,9 @@ jobs:
       - name: 'Checkout Gerrit change'
         if: inputs.gerrit_refspec != ''
         # yamllint disable-line rule:line-length
-        uses: lfreleng-actions/checkout-gerrit-change-action@298f53bbbc1d5f9e54df9feb484d110dc2b33197  # v1.1.0
+        uses: lfreleng-actions/checkout-gerrit-change-action@35e98c8043ec411611e464e296bcfb441a5c5093  # v1.1.2
         with:
-          gerrit-refspec: ${{ inputs.gerrit_refspec }}
+          gerrit-refspec: ${{ needs.tag-validate.outputs.sha }}
           gerrit-project: ${{ inputs.gerrit_project }}
           # yamllint disable-line rule:line-length
           gerrit-url: ${{ inputs.gerrit_url != '' && inputs.gerrit_url || vars.GERRIT_URL }}
@@ -582,72 +919,58 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           repository: ${{ inputs.repository || github.repository }}
-          ref: ${{ inputs.ref }}
+          ref: ${{ needs.tag-validate.outputs.sha }}
           persist-credentials: false
 
-      # TEMPLATE: Replace this placeholder with your language SBOM
-      # action. It MUST emit sbom-cyclonedx.json at the workspace root
-      # (the Grype job contract), e.g.:
-      #   - name: 'Generate SBOM'
-      #     uses: lfreleng-actions/<lang>-sbom-action@<SHA>  # vX.Y.Z
-      #     with:
-      #       path_prefix: ${{ inputs.path_prefix }}
-      # The placeholder writes a minimal VALID empty CycloneDX document
-      # so the downstream Grype scan stays fully functional.
-      - name: 'Generate SBOM (placeholder)'
-        shell: bash
-        run: |
-          # TEMPLATE: placeholder SBOM step; replace with a real SBOM
-          # generator emitting sbom-cyclonedx.json.
-          cat > sbom-cyclonedx.json <<'EOF'
-          {
-            "bomFormat": "CycloneDX",
-            "specVersion": "1.5",
-            "version": 1,
-            "components": []
-          }
-          EOF
-          echo "Wrote placeholder CycloneDX SBOM (0 components)"
-
-      - name: 'Upload SBOM artifacts'
+      - name: 'Restore the resolved lockfile'
+        if: needs.rust-metadata.outputs.lockfile_generated == 'true'
         # yamllint disable-line rule:line-length
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8.0.2
         with:
-          name: sbom-files
-          # Glob matches whichever SBOM formats the generator produced
-          path: sbom-cyclonedx.*
-          retention-days: 45
-          # Fail fast: the downstream Grype job requires this artifact,
-          # so a missing/misnamed SBOM must surface here, not later
-          if-no-files-found: error
+          name: ${{ needs.rust-metadata.outputs.lockfile_artefact }}
+          path: ${{ needs.rust-metadata.outputs.lockfile_dir }}
 
-      - name: 'SBOM summary'
-        shell: bash
-        run: |
-          # SBOM summary
-          {
-            echo "## SBOM Summary"
-            echo "Placeholder CycloneDX SBOM (0 components)"
-          } >> "$GITHUB_STEP_SUMMARY"
+      # Syft reads Cargo.lock, which lives at the workspace root, so the
+      # SBOM describes the root rather than path_prefix.
+      - name: 'Generate SBOM'
+        id: sbom
+        # yamllint disable-line rule:line-length
+        uses: lfreleng-actions/sbom-action@398aec0a5f332a0414246a6d9d45678ef4a95e98  # v0.3.0
+        with:
+          backend: 'syft'
+          path_prefix: ${{ needs.rust-metadata.outputs.lockfile_dir }}
+          sbom_format: ${{ inputs.sbom_format }}
+          output_directory: ${{ runner.temp }}/sbom
+
+      - name: 'Upload SBOM artefacts'
+        # yamllint disable-line rule:line-length
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
+        with:
+          name: sbom-files${{ inputs.artefact_suffix }}
+          path: ${{ runner.temp }}/sbom/
+          retention-days: 45
+          if-no-files-found: error
 
   grype:
     name: 'Grype Audit SBOM'
-    runs-on: ubuntu-latest
-    needs: 'sbom'
+    needs: sbom
     # yamllint disable-line rule:line-length
     if: ${{ !cancelled() && needs.sbom.result == 'success' && inputs.grype_enabled }}
-    timeout-minutes: 10
+    runs-on: ubuntu-latest
     permissions:
       contents: read
+      issues: read  # Maintainer-approved cve-bypass issues
+    timeout-minutes: ${{ inputs.audit_timeout_minutes }}
     steps:
       - name: 'Load egress allow-list'
         # yamllint disable-line rule:line-length
-        uses: lfreleng-actions/harden-runner-block-action@a32eb064a1188f6b0f15d2c0c0381efe54b0dd22  # v0.12.2
+        uses: lfreleng-actions/harden-runner-block-action@51ef68401547a8b648275129b9a21544612596d5  # v0.13.1
         with:
           config: ${{ inputs.harden_runner_allowlist }}
+          allow_list_summary: 'false'
       - name: 'Harden runner'
         # yamllint disable-line rule:line-length
-        uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1  # v2.21.1
+        uses: step-security/harden-runner@ccd8616d44fd3846e67624a50d5aad6d37bf2d25  # v2.22.1
         with:
           # yamllint disable-line rule:line-length
           egress-policy: ${{ inputs.harden_runner_egress == 'audit' && 'audit' || 'block' }}
@@ -656,60 +979,69 @@ jobs:
 
       - name: 'Download SBOM artefact'
         # yamllint disable-line rule:line-length
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8.0.2
         with:
-          name: sbom-files
+          name: sbom-files${{ inputs.artefact_suffix }}
 
-      # The grype_permit_fail input (or, when unset, the NO_BLOCK_AUDIT_FAIL
-      # repository variable) disables failure propagation so pull requests
-      # can proceed when blocked by newly discovered CVEs in transitive
-      # dependencies.
+      # A release always gates on its findings (gate-when 'always'):
+      # nothing here asks whether dependencies changed.
       - name: 'Grype audit SBOM'
         id: grype-audit
         # yamllint disable-line rule:line-length
         uses: lfreleng-actions/grype-scan-action@9a85f35a26a71dafb2fa23a6f83a640d526ee559  # v0.2.0
         with:
-          sbom: 'sbom-cyclonedx.json'
+          # The JSON document, or the XML one when that is all there is.
+          # yamllint disable-line rule:line-length
+          sbom: ${{ inputs.sbom_format == 'xml' && 'sbom-cyclonedx.xml' || 'sbom-cyclonedx.json' }}
           fail-on: ${{ inputs.grype_fail_on }}
+          only-fixed: ${{ inputs.grype_only_fixed }}
+          # Restore the database but never save one from a release run.
+          cache-db: 'restore-only'
           # yamllint disable-line rule:line-length
           permit-fail: ${{ inputs.grype_permit_fail || vars.NO_BLOCK_AUDIT_FAIL == 'true' }}
           github-token: ${{ secrets.GITHUB_TOKEN }}
+          artifact-name: grype-scan-results${{ inputs.artefact_suffix }}
 
   tests:
-    name: 'Tests'
-    runs-on: 'ubuntu-latest'
-    # Deferred until the audit operations (audit and Grype) pass, so
-    # the expensive test suite is skipped when either audit step fails
-    # (gating inversion: audits gate tests on releases).
-    #
-    # A skipped result is accepted ONLY when a toggle explains it. A
-    # bare 'skipped' is ambiguous: grype also skips when the sbom job
-    # FAILS, and treating that as acceptable would let a release run
-    # with no scan performed at all.
-    #
-    # sbom is a direct dependency for the same reason. With
-    # grype_enabled false, a genuine SBOM failure would otherwise be
-    # invisible here: grype skips either way, and the grype clause
-    # would accept that skip on the toggle alone.
+    name: 'Tests (${{ matrix.platform.arch }}, ${{ matrix.rust.label }})'
     needs:
-      - 'build'
-      - 'audit'
-      - 'sbom'
-      - 'grype'
-    # yamllint disable-line rule:line-length
-    if: ${{ !cancelled() && needs.build.result == 'success' && (needs.audit.result == 'success' || (needs.audit.result == 'skipped' && !inputs.audit_enabled)) && (needs.sbom.result == 'success' || (needs.sbom.result == 'skipped' && !inputs.sbom_enabled)) && (needs.grype.result == 'success' || (needs.grype.result == 'skipped' && (!inputs.grype_enabled || !inputs.sbom_enabled))) }}
+      - tag-validate
+      - rust-metadata
+      - build
+      - audit
+      - sbom
+      - grype
+    # Audits gate the test matrix on a release. A disabled audit counts
+    # as passed; a skipped one that was enabled does not.
+    if: >-
+      ${{ !cancelled() && inputs.tests_enabled
+      && needs.build.result == 'success'
+      && (needs.audit.result == 'success'
+        || (needs.audit.result == 'skipped' && !inputs.audit_enabled))
+      && (needs.sbom.result == 'success'
+        || (needs.sbom.result == 'skipped' && !inputs.sbom_enabled))
+      && (needs.grype.result == 'success'
+        || (needs.grype.result == 'skipped'
+          && (!inputs.grype_enabled || !inputs.sbom_enabled))) }}
+    strategy:
+      fail-fast: true
+      matrix:
+        platform: ${{ fromJSON(needs.rust-metadata.outputs.runners) }}
+        rust: ${{ fromJSON(needs.rust-metadata.outputs.test_matrix) }}
+    runs-on: ${{ matrix.platform.runner }}
     permissions:
       contents: read
-    timeout-minutes: 12
+    timeout-minutes: ${{ inputs.test_timeout_minutes }}
     steps:
       - name: 'Load egress allow-list'
         # yamllint disable-line rule:line-length
-        uses: lfreleng-actions/harden-runner-block-action@a32eb064a1188f6b0f15d2c0c0381efe54b0dd22  # v0.12.2
+        uses: lfreleng-actions/harden-runner-block-action@51ef68401547a8b648275129b9a21544612596d5  # v0.13.1
         with:
           config: ${{ inputs.harden_runner_allowlist }}
+          allow_list_summary: 'false'
       - name: 'Harden runner'
         # yamllint disable-line rule:line-length
-        uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1  # v2.21.1
+        uses: step-security/harden-runner@ccd8616d44fd3846e67624a50d5aad6d37bf2d25  # v2.22.1
         with:
           # yamllint disable-line rule:line-length
           egress-policy: ${{ inputs.harden_runner_egress == 'audit' && 'audit' || 'block' }}
@@ -719,9 +1051,9 @@ jobs:
       - name: 'Checkout Gerrit change'
         if: inputs.gerrit_refspec != ''
         # yamllint disable-line rule:line-length
-        uses: lfreleng-actions/checkout-gerrit-change-action@298f53bbbc1d5f9e54df9feb484d110dc2b33197  # v1.1.0
+        uses: lfreleng-actions/checkout-gerrit-change-action@35e98c8043ec411611e464e296bcfb441a5c5093  # v1.1.2
         with:
-          gerrit-refspec: ${{ inputs.gerrit_refspec }}
+          gerrit-refspec: ${{ needs.tag-validate.outputs.sha }}
           gerrit-project: ${{ inputs.gerrit_project }}
           # yamllint disable-line rule:line-length
           gerrit-url: ${{ inputs.gerrit_url != '' && inputs.gerrit_url || vars.GERRIT_URL }}
@@ -734,59 +1066,520 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           repository: ${{ inputs.repository || github.repository }}
-          ref: ${{ inputs.ref }}
+          ref: ${{ needs.tag-validate.outputs.sha }}
           persist-credentials: false
 
-      # TEMPLATE: Replace this placeholder with your language test
-      # action. Pass test_permit_fail through to the action's own
-      # permit_fail input where available, e.g.:
-      #   - name: 'Run tests'
-      #     uses: lfreleng-actions/<lang>-test-action@<SHA>  # vX.Y.Z
-      #     with:
-      #       path_prefix: ${{ inputs.path_prefix }}
-      #       permit_fail: ${{ inputs.test_permit_fail }}
-      - name: 'Run tests (placeholder)'
+      - name: 'Restore the resolved lockfile'
+        if: needs.rust-metadata.outputs.lockfile_generated == 'true'
+        # yamllint disable-line rule:line-length
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8.0.2
+        with:
+          name: ${{ needs.rust-metadata.outputs.lockfile_artefact }}
+          path: ${{ needs.rust-metadata.outputs.lockfile_dir }}
+
+      - name: 'Run tests'
+        # yamllint disable-line rule:line-length
+        uses: lfreleng-actions/rust-test-action@8e69a16038a3c4d0cf710c81039094b0ad9feb40  # v0.0.1
+        with:
+          path_prefix: ${{ inputs.path_prefix }}
+          manifest_path: ${{ inputs.manifest_path }}
+          workspace: ${{ inputs.workspace }}
+          packages: ${{ inputs.packages }}
+          exclude: ${{ inputs.exclude }}
+          features: ${{ inputs.features }}
+          all_features: ${{ inputs.all_features }}
+          no_default_features: ${{ inputs.no_default_features }}
+          toolchain: ${{ matrix.rust.toolchain }}
+          # yamllint disable-line rule:line-length
+          toolchain_components: ${{ needs.rust-metadata.outputs.toolchain_components }}
+          # yamllint disable-line rule:line-length
+          toolchain_targets: ${{ needs.rust-metadata.outputs.toolchain_targets }}
+          lockfile_required: ${{ inputs.lockfile_required }}
+          setup_script: ${{ inputs.setup_script }}
+          test_runner: ${{ inputs.test_runner }}
+          test_args: ${{ inputs.test_args }}
+          doc_tests: ${{ inputs.doc_tests }}
+          # yamllint disable-line rule:line-length
+          coverage: ${{ inputs.coverage && matrix.rust.label == 'project' }}
+          # yamllint disable-line rule:line-length
+          artefact_name: rust-test-results-${{ matrix.platform.arch }}-${{ matrix.rust.label }}${{ inputs.artefact_suffix }}
+          permit_fail: ${{ inputs.test_permit_fail }}
+
+  # BRIEF Q7. Dry-runs the publish: checks the tag against every crate
+  # version, compiles the packaged crates and records their digests.
+  # It holds no credential: publish uploads only these exact bytes.
+  crate-verify:
+    name: 'Verify Crates'
+    needs:
+      - tag-validate
+      - rust-metadata
+      - build
+      - audit
+      - sbom
+      - grype
+      - tests
+    # Every gate is checked here, not through tests alone: with tests
+    # switched off, a skipped test job says nothing about the audits.
+    # yamllint disable rule:line-length
+    if: >-
+      ${{ !cancelled()
+      && needs.build.result == 'success'
+      && (needs.tests.result == 'success'
+        || (needs.tests.result == 'skipped' && !inputs.tests_enabled))
+      && (needs.audit.result == 'success'
+        || (needs.audit.result == 'skipped' && !inputs.audit_enabled))
+      && (needs.sbom.result == 'success'
+        || (needs.sbom.result == 'skipped' && !inputs.sbom_enabled))
+      && (needs.grype.result == 'success'
+        || (needs.grype.result == 'skipped'
+          && (!inputs.grype_enabled || !inputs.sbom_enabled)))
+      && needs.rust-metadata.result == 'success'
+      && needs.rust-metadata.outputs.publishable_count != '0' }}
+    # yamllint enable rule:line-length
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    timeout-minutes: ${{ inputs.build_timeout_minutes }}
+    outputs:
+      crate_name: ${{ steps.verify.outputs.crate_name }}
+      crate_version: ${{ steps.verify.outputs.crate_version }}
+      crate_sha256: ${{ steps.verify.outputs.crate_sha256 }}
+    env:
+      # The publisher has no toolchain input; it pins whatever rustup
+      # selects, which honours this variable (BRIEF Q3).
+      RUSTUP_TOOLCHAIN: ${{ needs.rust-metadata.outputs.toolchain }}
+    steps:
+      - name: 'Load egress allow-list'
+        # yamllint disable-line rule:line-length
+        uses: lfreleng-actions/harden-runner-block-action@51ef68401547a8b648275129b9a21544612596d5  # v0.13.1
+        with:
+          config: ${{ inputs.harden_runner_allowlist }}
+          allow_list_summary: 'false'
+      - name: 'Harden runner'
+        # yamllint disable-line rule:line-length
+        uses: step-security/harden-runner@ccd8616d44fd3846e67624a50d5aad6d37bf2d25  # v2.22.1
+        with:
+          # yamllint disable-line rule:line-length
+          egress-policy: ${{ inputs.harden_runner_egress == 'audit' && 'audit' || 'block' }}
+          allowed-endpoints: >
+            ${{ env.CONNECTION_ALLOW_LIST }}
+
+      - name: 'Checkout Gerrit change'
+        if: inputs.gerrit_refspec != ''
+        # yamllint disable-line rule:line-length
+        uses: lfreleng-actions/checkout-gerrit-change-action@35e98c8043ec411611e464e296bcfb441a5c5093  # v1.1.2
+        with:
+          gerrit-refspec: ${{ needs.tag-validate.outputs.sha }}
+          gerrit-project: ${{ inputs.gerrit_project }}
+          # yamllint disable-line rule:line-length
+          gerrit-url: ${{ inputs.gerrit_url != '' && inputs.gerrit_url || vars.GERRIT_URL }}
+          delay: '0s'
+          repository: ${{ inputs.repository || github.repository }}
+          ref: refs/heads/${{ inputs.gerrit_branch }}
+      - name: 'Checkout repository'
+        if: inputs.gerrit_refspec == ''
+        # yamllint disable-line rule:line-length
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: ${{ inputs.repository || github.repository }}
+          ref: ${{ needs.tag-validate.outputs.sha }}
+          persist-credentials: false
+
+      - name: 'Restore the resolved lockfile'
+        if: needs.rust-metadata.outputs.lockfile_generated == 'true'
+        # yamllint disable-line rule:line-length
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8.0.2
+        with:
+          name: ${{ needs.rust-metadata.outputs.lockfile_artefact }}
+          path: ${{ needs.rust-metadata.outputs.lockfile_dir }}
+
+      - name: 'Install the toolchain'
+        shell: bash
+        run: |
+          # Install the toolchain
+          # From outside the checkout, so no project configuration
+          # applies, and with the environment scrub the actions apply
+          # (docs/BRIEF.md Q4).
+          set -euo pipefail
+          cd "$RUNNER_TEMP"
+          scrub=(env -u CARGO_REGISTRY_TOKEN
+            -u ACTIONS_ID_TOKEN_REQUEST_TOKEN
+            -u ACTIONS_ID_TOKEN_REQUEST_URL -u ACTIONS_RUNTIME_TOKEN
+            -u GITHUB_OUTPUT -u GITHUB_ENV -u GITHUB_PATH
+            -u GITHUB_STATE -u GITHUB_STEP_SUMMARY)
+          while IFS= read -r name; do
+            scrub+=(-u "$name")
+          done < <(compgen -e | grep -E '^CARGO_REGISTRIES_.+_TOKEN$' \
+            || true)
+          "${scrub[@]}" rustup toolchain install "$RUSTUP_TOOLCHAIN" \
+            --profile minimal --no-self-update
+          "${scrub[@]}" cargo --version
+
+      # The publisher takes no setup_script, yet this job compiles the
+      # packaged crates. Run the script here with the checks and the
+      # environment scrub the actions apply.
+      - name: 'Run the setup script'
+        if: inputs.setup_script != ''
         shell: bash
         env:
-          # The NO_BLOCK/soft-fail pattern: the test_permit_fail input
-          # (or, when unset, the NO_BLOCK_AUDIT_FAIL repository
-          # variable) disables failure propagation.
-          # yamllint disable-line rule:line-length
-          NO_BLOCK: ${{ inputs.test_permit_fail || vars.NO_BLOCK_AUDIT_FAIL == 'true' }}
+          PATH_PREFIX: ${{ inputs.path_prefix }}
+          SETUP_SCRIPT: ${{ inputs.setup_script }}
         run: |
-          # TEMPLATE: placeholder test step; replace with real tests.
-          status=0
-          echo "Placeholder tests executed"
-          if [ "${status}" != "0" ]; then
-            if [ "${NO_BLOCK}" = "true" ]; then
-              echo "::warning::Tests failed, but failures are" \
-                "permitted so the job will not fail."
-              exit 0
-            fi
-            exit "${status}"
+          # Run the setup script
+          set -euo pipefail
+          workspace="$(realpath -e -- "$GITHUB_WORKSPACE")"
+          project="$(realpath -e -- "$workspace/$PATH_PREFIX")"
+          script="$project/$SETUP_SCRIPT"
+          case "$SETUP_SCRIPT" in
+            /*)
+              echo "::error::setup_script must be a relative path"
+              exit 1 ;;
+          esac
+          if [ -L "$script" ] || [ ! -f "$script" ]; then
+            echo "::error::setup_script does not name a regular file"
+            exit 1
           fi
+          script="$(realpath -e -- "$script")"
+          # The project must sit inside the workspace, and the script
+          # inside the project the lane acts on, as the actions require.
+          case "$project/" in
+            "$workspace"/*) ;;
+            *)
+              echo "::error::path_prefix must stay inside the workspace"
+              exit 1 ;;
+          esac
+          case "$script" in
+            "$project"/*) ;;
+            *)
+              echo "::error::setup_script must stay inside path_prefix"
+              exit 1 ;;
+          esac
+          scrub=(env -u CARGO_REGISTRY_TOKEN
+            -u ACTIONS_ID_TOKEN_REQUEST_TOKEN
+            -u ACTIONS_ID_TOKEN_REQUEST_URL -u ACTIONS_RUNTIME_TOKEN
+            -u GITHUB_OUTPUT -u GITHUB_ENV -u GITHUB_PATH
+            -u GITHUB_STATE -u GITHUB_STEP_SUMMARY)
+          while IFS= read -r name; do
+            scrub+=(-u "$name")
+          done < <(compgen -e | grep -E '^CARGO_REGISTRIES_.+_TOKEN$' \
+            || true)
+          cd "$project"
+          "${scrub[@]}" bash "$script"
 
+      - name: 'Verify crates for release'
+        id: verify
+        # yamllint disable-line rule:line-length
+        uses: lfreleng-actions/rust-crate-publish-action@3d8f7294648ec1f47e2aa48b71bed96418de5ba1  # v0.1.0
+        with:
+          path_prefix: ${{ inputs.path_prefix }}
+          manifest_path: ${{ inputs.manifest_path }}
+          workspace: ${{ inputs.workspace }}
+          packages: ${{ inputs.packages }}
+          exclude: ${{ inputs.exclude }}
+          release_tag: ${{ needs.tag-validate.outputs.tag }}
+          semver_checks: ${{ inputs.semver_checks }}
+          dry_run: 'true'
+
+  # Drafts the release when release-drafter has not, then attaches the
+  # assets. It runs no crate code: it downloads, hashes, attests, signs
+  # and uploads, and never executes a downloaded binary.
   attach-artefacts:
     name: 'Attach Artefacts to Release'
-    runs-on: 'ubuntu-latest'
     needs:
-      - 'tag-validate'
-      - 'build'
-      - 'tests'
+      - tag-validate
+      - rust-metadata
+      - build
+      - audit
+      - sbom
+      - grype
+      - tests
+      - crate-verify
+    # A release without publishable crates skips crate-verify, so the
+    # gates are checked here directly as well.
+    # yamllint disable rule:line-length
+    if: >-
+      ${{ !cancelled()
+      && needs.build.result == 'success'
+      && (needs.tests.result == 'success'
+        || (needs.tests.result == 'skipped' && !inputs.tests_enabled))
+      && (needs.audit.result == 'success'
+        || (needs.audit.result == 'skipped' && !inputs.audit_enabled))
+      && (needs.sbom.result == 'success'
+        || (needs.sbom.result == 'skipped' && !inputs.sbom_enabled))
+      && (needs.grype.result == 'success'
+        || (needs.grype.result == 'skipped'
+          && (!inputs.grype_enabled || !inputs.sbom_enabled)))
+      && (needs.crate-verify.result == 'success'
+        || (needs.crate-verify.result == 'skipped'
+          && needs.rust-metadata.outputs.publishable_count == '0')) }}
+    # yamllint enable rule:line-length
+    runs-on: ubuntu-latest
     permissions:
-      contents: write  # IMPORTANT: needed to edit release, attach artefacts
-    timeout-minutes: 5
-    env:
-      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      contents: write  # Draft the release and attach assets
+      id-token: write  # Attestations and Sigstore keyless signing
+      attestations: write  # Store build provenance attestations
+    timeout-minutes: 15
     steps:
       - name: 'Load egress allow-list'
         # yamllint disable-line rule:line-length
-        uses: lfreleng-actions/harden-runner-block-action@a32eb064a1188f6b0f15d2c0c0381efe54b0dd22  # v0.12.2
+        uses: lfreleng-actions/harden-runner-block-action@51ef68401547a8b648275129b9a21544612596d5  # v0.13.1
         with:
           config: ${{ inputs.harden_runner_allowlist }}
+          allow_list_summary: 'false'
       - name: 'Harden runner'
         # yamllint disable-line rule:line-length
-        uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1  # v2.21.1
+        uses: step-security/harden-runner@ccd8616d44fd3846e67624a50d5aad6d37bf2d25  # v2.22.1
+        with:
+          # yamllint disable-line rule:line-length
+          egress-policy: ${{ inputs.harden_runner_egress == 'audit' && 'audit' || 'block' }}
+          allowed-endpoints: >
+            ${{ env.CONNECTION_ALLOW_LIST }}
+
+      - name: 'Download build artefacts'
+        # yamllint disable-line rule:line-length
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8.0.2
+        with:
+          pattern: rust-build-*${{ inputs.artefact_suffix }}
+          path: ${{ runner.temp }}/build
+      - name: 'Download SBOM artefacts'
+        if: inputs.sbom_enabled
+        # yamllint disable-line rule:line-length
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8.0.2
+        with:
+          name: sbom-files${{ inputs.artefact_suffix }}
+          path: ${{ runner.temp }}/sbom
+
+      # Collects every asset into one flat directory. Crates come from
+      # the first platform and must match crate-verify's digests, so a
+      # release asset is byte-identical to what crates.io receives.
+      # Binaries gain their platform's arch, so platforms cannot clash.
+      - name: 'Collect release assets'
+        id: collect
+        shell: bash
+        env:
+          BUILD_DIR: ${{ runner.temp }}/build
+          SBOM_DIR: ${{ runner.temp }}/sbom
+          ASSETS: ${{ runner.temp }}/assets
+          RUNNERS: ${{ needs.rust-metadata.outputs.runners }}
+          SUFFIX: ${{ inputs.artefact_suffix }}
+          # yamllint disable-line rule:line-length
+          PUBLISHABLE: ${{ needs.rust-metadata.outputs.publishable_packages }}
+          CRATE_NAMES: ${{ needs.crate-verify.outputs.crate_name }}
+          CRATE_SHA256: ${{ needs.crate-verify.outputs.crate_sha256 }}
+        run: |
+          # Collect release assets
+          set -euo pipefail
+          fail() { echo "::error::$*"; exit 1; }
+          mkdir -p "$ASSETS"
+          first="$(jq -r '.[0].arch' <<< "$RUNNERS")"
+          # download-artifact extracts each match into its own directory,
+          # unless the pattern matches one artefact alone, which it
+          # extracts straight into the path. One artefact alone is the
+          # first platform's: the only one, or, without binaries, the
+          # only one that packaged anything.
+          nested=false
+          while IFS= read -r arch; do
+            if [ -d "$BUILD_DIR/rust-build-$arch$SUFFIX" ]; then
+              nested=true
+            fi
+          done < <(jq -r '.[].arch' <<< "$RUNNERS")
+          build_dir() {
+            if [ "$nested" = 'true' ]; then
+              echo "$BUILD_DIR/rust-build-$1$SUFFIX"
+            elif [ "$1" = "$first" ]; then
+              echo "$BUILD_DIR"
+            else
+              echo "$BUILD_DIR/absent"
+            fi
+          }
+
+          # The build ran crate code, so nothing in its artefact is
+          # trusted: each asset must be a regular file directly in its
+          # artefact, and each crate's own bytes must hash to the digest
+          # crate-verify recorded. Names and versions come from
+          # crate-verify and rust-metadata, never from the artefact.
+          regular() {
+            local path="$1" dir="$2" real
+            [ -f "$path" ] && [ ! -L "$path" ] || return 1
+            real="$(realpath -e -- "$path")" || return 1
+            [ "$(dirname -- "$real")" = "$(realpath -e -- "$dir")" ]
+          }
+          digest() { sha256sum -- "$1" | cut -d' ' -f1; }
+
+          # crate-verify reports a bare digest for one crate and a JSON
+          # object of name to digest for several.
+          if [ -n "$CRATE_NAMES" ]; then
+            if [[ "$CRATE_SHA256" == '{'* ]]; then
+              expected="$CRATE_SHA256"
+            else
+              expected="$(jq -cn --arg n "$CRATE_NAMES" \
+                --arg d "$CRATE_SHA256" '{($n): $d}')"
+            fi
+            crates_dir="$(build_dir "$first")/crates"
+            for name in $CRATE_NAMES; do
+              [[ "$name" =~ ^[A-Za-z0-9_-]+$ ]] \
+                || fail "crate-verify reported an invalid crate name"
+              version="$(jq -r --arg n "$name" \
+                '.[] | select(.name == $n) | .version' <<< "$PUBLISHABLE")"
+              [[ "$version" =~ ^[0-9A-Za-z.+-]+$ ]] \
+                || fail "$name: no version in the project metadata"
+              want="$(jq -r --arg n "$name" '.[$n] // empty' \
+                <<< "$expected")"
+              file="$crates_dir/$name-$version.crate"
+              regular "$file" "$crates_dir" \
+                || fail "The build did not package $name $version"
+              got="$(digest "$file")"
+              [ "$got" = "$want" ] \
+                || fail "$name: the built crate ($got) differs from the" \
+                  "verified one ($want)"
+              cp -- "$file" "$ASSETS/$name-$version.crate"
+              echo "✅ $name-$version.crate matches crate-verify"
+            done
+          fi
+
+          while IFS= read -r arch; do
+            dir="$(build_dir "$arch")"
+            [ -f "$dir/SHA256SUMS" ] || continue
+            while read -r sum name; do
+              name="${name#\*}"
+              [[ "$name" =~ ^[A-Za-z0-9_+-][A-Za-z0-9._+-]*$ ]] \
+                || fail "Unexpected binary name in SHA256SUMS"
+              regular "$dir/$name" "$dir" \
+                || fail "$name is not a regular file in the artefact"
+              [ "$(digest "$dir/$name")" = "$sum" ] \
+                || fail "$name does not match its SHA256SUMS line"
+              stem="${name%.exe}"
+              suffix="${name#"$stem"}"
+              cp -- "$dir/$name" "$ASSETS/$stem-$arch$suffix"
+            done < "$dir/SHA256SUMS"
+          done < <(jq -r '.[].arch' <<< "$RUNNERS")
+
+          if [ -d "$SBOM_DIR" ]; then
+            find "$SBOM_DIR" -maxdepth 1 -type f \
+              -name 'sbom-cyclonedx.*' -exec cp -- {} "$ASSETS/" \;
+          fi
+
+          cd "$ASSETS"
+          shopt -s nullglob
+          files=(*)
+          if [ "${#files[@]}" -eq 0 ]; then
+            echo "count=0" >> "$GITHUB_OUTPUT"
+            echo "::notice::No release assets to attach"
+            exit 0
+          fi
+          sha256sum -- "${files[@]}" > "$RUNNER_TEMP/SHA256SUMS"
+          mv -- "$RUNNER_TEMP/SHA256SUMS" SHA256SUMS
+          echo "count=$((${#files[@]} + 1))" >> "$GITHUB_OUTPUT"
+          {
+            echo '## 🦀 Release Assets'
+            echo
+            echo '| Asset | SHA-256 |'
+            echo '| ----- | ------- |'
+            while read -r digest name; do
+              echo "| \`$name\` | \`$digest\` |"
+            done < SHA256SUMS
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # A rehearsal keeps what it would have released, for inspection.
+      - name: 'Upload rehearsed release assets'
+        if: inputs.dry_run && steps.collect.outputs.count != '0'
+        # yamllint disable-line rule:line-length
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
+        with:
+          name: release-assets${{ inputs.artefact_suffix }}
+          path: ${{ runner.temp }}/assets/
+          retention-days: 7
+          if-no-files-found: error
+
+      - name: 'Attest build provenance'
+        # yamllint disable-line rule:line-length
+        if: inputs.attestations && !inputs.dry_run && steps.collect.outputs.count != '0'
+        # yamllint disable-line rule:line-length
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6  # v4.2.2
+        with:
+          subject-checksums: ${{ runner.temp }}/assets/SHA256SUMS
+
+      - name: 'Install cosign'
+        # yamllint disable-line rule:line-length
+        if: inputs.sigstore_sign && !inputs.dry_run && steps.collect.outputs.count != '0'
+        # yamllint disable-line rule:line-length
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6  # v4.1.2
+
+      - name: 'Sign assets with Sigstore'
+        # yamllint disable-line rule:line-length
+        if: inputs.sigstore_sign && !inputs.dry_run && steps.collect.outputs.count != '0'
+        shell: bash
+        env:
+          ASSETS: ${{ runner.temp }}/assets
+        run: |
+          # Sign assets with Sigstore
+          set -euo pipefail
+          cd "$ASSETS"
+          for file in *; do
+            cosign sign-blob --yes --bundle "$file.sigstore.json" \
+              -- "$file" > /dev/null
+            echo "✅ Signed $file"
+          done
+
+      - name: 'Attach assets to the draft release'
+        if: ${{ !inputs.dry_run && steps.collect.outputs.count != '0' }}
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPOSITORY: ${{ inputs.repository || github.repository }}
+          TAG: ${{ needs.tag-validate.outputs.tag }}
+          ASSETS: ${{ runner.temp }}/assets
+        run: |
+          # Attach assets to the draft release
+          set -euo pipefail
+          if ! draft="$(gh release view "$TAG" --repo "$REPOSITORY" \
+              --json isDraft --jq .isDraft 2> /dev/null)"; then
+            echo "Creating a draft release for $TAG"
+            gh release create "$TAG" --repo "$REPOSITORY" --draft \
+              --verify-tag --title "$TAG" --notes "Release $TAG"
+            draft=true
+          fi
+          if [ "$draft" != 'true' ]; then
+            echo "::error::The release for $TAG is already published"
+            exit 1
+          fi
+          gh release upload "$TAG" --repo "$REPOSITORY" --clobber \
+            -- "$ASSETS"/*
+
+  # BRIEF Q9. The only job holding a crates.io credential, minted
+  # through Trusted Publishing for this run. It runs no crate code: the
+  # publisher repackages without building and uploads only an archive
+  # identical to the one crate-verify compiled.
+  publish:
+    name: 'Publish to crates.io'
+    needs:
+      - tag-validate
+      - rust-metadata
+      - crate-verify
+      - attach-artefacts
+    # yamllint disable-line rule:line-length
+    if: ${{ !cancelled() && inputs.publish_enabled && !inputs.dry_run && needs.crate-verify.result == 'success' && needs.attach-artefacts.result == 'success' }}
+    runs-on: ubuntu-latest
+    environment:
+      name: ${{ inputs.publish_environment }}
+    permissions:
+      contents: read
+      id-token: write  # crates.io Trusted Publishing
+    timeout-minutes: 15
+    outputs:
+      publish_status: ${{ steps.publish.outputs.publish_status }}
+    env:
+      RUSTUP_TOOLCHAIN: ${{ needs.rust-metadata.outputs.toolchain }}
+    steps:
+      - name: 'Load egress allow-list'
+        # yamllint disable-line rule:line-length
+        uses: lfreleng-actions/harden-runner-block-action@51ef68401547a8b648275129b9a21544612596d5  # v0.13.1
+        with:
+          config: ${{ inputs.harden_runner_allowlist }}
+          allow_list_summary: 'false'
+      - name: 'Harden runner'
+        # yamllint disable-line rule:line-length
+        uses: step-security/harden-runner@ccd8616d44fd3846e67624a50d5aad6d37bf2d25  # v2.22.1
         with:
           # yamllint disable-line rule:line-length
           egress-policy: ${{ inputs.harden_runner_egress == 'audit' && 'audit' || 'block' }}
@@ -796,9 +1589,9 @@ jobs:
       - name: 'Checkout Gerrit change'
         if: inputs.gerrit_refspec != ''
         # yamllint disable-line rule:line-length
-        uses: lfreleng-actions/checkout-gerrit-change-action@298f53bbbc1d5f9e54df9feb484d110dc2b33197  # v1.1.0
+        uses: lfreleng-actions/checkout-gerrit-change-action@35e98c8043ec411611e464e296bcfb441a5c5093  # v1.1.2
         with:
-          gerrit-refspec: ${{ inputs.gerrit_refspec }}
+          gerrit-refspec: ${{ needs.tag-validate.outputs.sha }}
           gerrit-project: ${{ inputs.gerrit_project }}
           # yamllint disable-line rule:line-length
           gerrit-url: ${{ inputs.gerrit_url != '' && inputs.gerrit_url || vars.GERRIT_URL }}
@@ -811,107 +1604,141 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           repository: ${{ inputs.repository || github.repository }}
-          ref: ${{ inputs.ref }}
+          ref: ${{ needs.tag-validate.outputs.sha }}
           persist-credentials: false
 
-      - name: '⬇ Download build artefacts'
+      - name: 'Restore the resolved lockfile'
+        if: needs.rust-metadata.outputs.lockfile_generated == 'true'
         # yamllint disable-line rule:line-length
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8.0.2
         with:
-          name: ${{ needs.build.outputs.artefact_name }}
-          path: ${{ needs.build.outputs.artefact_path }}
+          name: ${{ needs.rust-metadata.outputs.lockfile_artefact }}
+          path: ${{ needs.rust-metadata.outputs.lockfile_dir }}
 
-      - name: 'Attach build artefacts to release'
+      # The archive digest depends on the Cargo that packages it, so
+      # this job installs the toolchain crate-verify used.
+      - name: 'Install the toolchain'
+        shell: bash
+        run: |
+          # Install the toolchain
+          # From outside the checkout, so no project configuration
+          # applies, and with the environment scrub the actions apply
+          # (docs/BRIEF.md Q4).
+          set -euo pipefail
+          cd "$RUNNER_TEMP"
+          scrub=(env -u CARGO_REGISTRY_TOKEN
+            -u ACTIONS_ID_TOKEN_REQUEST_TOKEN
+            -u ACTIONS_ID_TOKEN_REQUEST_URL -u ACTIONS_RUNTIME_TOKEN
+            -u GITHUB_OUTPUT -u GITHUB_ENV -u GITHUB_PATH
+            -u GITHUB_STATE -u GITHUB_STEP_SUMMARY)
+          while IFS= read -r name; do
+            scrub+=(-u "$name")
+          done < <(compgen -e | grep -E '^CARGO_REGISTRIES_.+_TOKEN$' \
+            || true)
+          "${scrub[@]}" rustup toolchain install "$RUSTUP_TOOLCHAIN" \
+            --profile minimal --no-self-update
+          "${scrub[@]}" cargo --version
+
+      # Exchanges this job's OIDC token for a short-lived crates.io
+      # token, which the action's post step revokes.
+      - name: 'Authenticate to crates.io'
+        id: auth
         # yamllint disable-line rule:line-length
-        uses: lfreleng-actions/release-assets-action@51e2955cf9aeab3731efd7cc4605aa2847e7d8e2  # v0.1.3
+        uses: rust-lang/crates-io-auth-action@c6f97d42243bad5fab37ca0427f495c86d5b1a18  # v1.0.5
+
+      - name: 'Publish crates'
+        id: publish
+        # yamllint disable-line rule:line-length
+        uses: lfreleng-actions/rust-crate-publish-action@3d8f7294648ec1f47e2aa48b71bed96418de5ba1  # v0.1.0
         with:
-          asset_paths: '["${{ needs.build.outputs.artefact_path }}/**"]'
+          path_prefix: ${{ inputs.path_prefix }}
+          manifest_path: ${{ inputs.manifest_path }}
+          workspace: ${{ inputs.workspace }}
+          packages: ${{ inputs.packages }}
+          exclude: ${{ inputs.exclude }}
           release_tag: ${{ needs.tag-validate.outputs.tag }}
+          registry_token: ${{ steps.auth.outputs.token }}
+          expected_sha256: ${{ needs.crate-verify.outputs.crate_sha256 }}
 
   promote-release:
     name: 'Promote Draft Release'
     needs:
-      - 'tag-validate'
-      - 'attach-artefacts'
-    runs-on: 'ubuntu-latest'
+      - tag-validate
+      - rust-metadata
+      - attach-artefacts
+      - publish
+    # Publication, when enabled and due, must succeed first, so a failed
+    # upload leaves a draft rather than a release without its crates.
+    if: >-
+      ${{ !cancelled() && !inputs.dry_run
+      && needs.attach-artefacts.result == 'success'
+      && (needs.publish.result == 'success'
+        || (needs.publish.result == 'skipped'
+          && (!inputs.publish_enabled
+            || needs.rust-metadata.outputs.publishable_count == '0'))) }}
+    runs-on: ubuntu-latest
     permissions:
-      contents: write  # IMPORTANT: needed for draft release promotion
-    timeout-minutes: 2
+      contents: write  # Draft and publish the release for the tag
+    timeout-minutes: 5
     outputs:
-      # yamllint disable-line rule:line-length
-      release_url: ${{ steps.promote-release.outputs.release_url || steps.set-promoted-url.outputs.release_url }}
+      release_url: ${{ steps.url.outputs.release_url }}
     steps:
       - name: 'Load egress allow-list'
         # yamllint disable-line rule:line-length
-        uses: lfreleng-actions/harden-runner-block-action@a32eb064a1188f6b0f15d2c0c0381efe54b0dd22  # v0.12.2
+        uses: lfreleng-actions/harden-runner-block-action@51ef68401547a8b648275129b9a21544612596d5  # v0.13.1
         with:
           config: ${{ inputs.harden_runner_allowlist }}
+          allow_list_summary: 'false'
       - name: 'Harden runner'
         # yamllint disable-line rule:line-length
-        uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1  # v2.21.1
+        uses: step-security/harden-runner@ccd8616d44fd3846e67624a50d5aad6d37bf2d25  # v2.22.1
         with:
           # yamllint disable-line rule:line-length
           egress-policy: ${{ inputs.harden_runner_egress == 'audit' && 'audit' || 'block' }}
           allowed-endpoints: >
             ${{ env.CONNECTION_ALLOW_LIST }}
 
-      - name: 'Checkout Gerrit change'
-        if: inputs.gerrit_refspec != ''
-        # yamllint disable-line rule:line-length
-        uses: lfreleng-actions/checkout-gerrit-change-action@298f53bbbc1d5f9e54df9feb484d110dc2b33197  # v1.1.0
-        with:
-          gerrit-refspec: ${{ inputs.gerrit_refspec }}
-          gerrit-project: ${{ inputs.gerrit_project }}
-          # yamllint disable-line rule:line-length
-          gerrit-url: ${{ inputs.gerrit_url != '' && inputs.gerrit_url || vars.GERRIT_URL }}
-          delay: '0s'
-          repository: ${{ inputs.repository || github.repository }}
-          ref: refs/heads/${{ inputs.gerrit_branch }}
-      - name: 'Checkout repository'
-        if: inputs.gerrit_refspec == ''
-        # yamllint disable-line rule:line-length
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          repository: ${{ inputs.repository || github.repository }}
-          ref: ${{ inputs.ref }}
-          persist-credentials: false
-
-      - name: 'Check if release is already promoted'
-        id: 'check-promoted'
+      # A release with no assets has no draft yet; create it. Both this
+      # and the promotion are idempotent, so a re-run is safe.
+      - name: 'Check the release state'
+        id: state
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPOSITORY: ${{ inputs.repository || github.repository }}
           TAG: ${{ needs.tag-validate.outputs.tag }}
         run: |
-          # Check if release is already promoted
-          if gh release view "$TAG" --json isDraft --jq '.isDraft' \
-              2>/dev/null | grep -q "false"; then
-            echo "Release $TAG is already promoted, skipping promotion"
-            echo "already_promoted=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "Release $TAG is draft or doesn't exist, " \
-                 "proceeding with promotion"
-            echo "already_promoted=false" >> "$GITHUB_OUTPUT"
+          # Check the release state
+          set -euo pipefail
+          if ! draft="$(gh release view "$TAG" --repo "$REPOSITORY" \
+              --json isDraft --jq .isDraft 2> /dev/null)"; then
+            echo "Creating a draft release for $TAG"
+            gh release create "$TAG" --repo "$REPOSITORY" --draft \
+              --verify-tag --title "$TAG" --notes "Release $TAG"
+            draft=true
           fi
+          echo "draft=$draft" >> "$GITHUB_OUTPUT"
 
       - name: 'Promote draft release'
-        id: 'promote-release'
-        if: steps.check-promoted.outputs.already_promoted == 'false'
+        if: steps.state.outputs.draft == 'true'
         # yamllint disable-line rule:line-length
         uses: lfreleng-actions/draft-release-promote-action@e420b392557c9b1eea642f0d54dec4ff39086d5f  # v0.1.5
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
           tag: ${{ needs.tag-validate.outputs.tag }}
-          latest: true
+          latest: 'true'
 
-      - name: 'Set release URL for already promoted release'
-        id: 'set-promoted-url'
-        if: steps.check-promoted.outputs.already_promoted == 'true'
+      - name: 'Report the release URL'
+        id: url
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPOSITORY: ${{ inputs.repository || github.repository }}
           TAG: ${{ needs.tag-validate.outputs.tag }}
         run: |
-          # Set release URL for already promoted release
-          RELEASE_URL=$(gh release view "$TAG" --json url --jq '.url')
-          echo "release_url=$RELEASE_URL" >> "$GITHUB_OUTPUT"
+          # Report the release URL
+          set -euo pipefail
+          url="$(gh release view "$TAG" --repo "$REPOSITORY" \
+            --json url --jq .url)"
+          echo "release_url=$url" >> "$GITHUB_OUTPUT"
+          echo "Released: $url"

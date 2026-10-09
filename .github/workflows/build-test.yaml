@@ -2,22 +2,23 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: 2026 The Linux Foundation
 
-# Reusable build/test pipeline SKELETON (language-agnostic template).
+# Reusable Rust build/test pipeline: the verify lane.
 #
-# Reproduces the canonical Linux Foundation pipeline shape. The
-# repository-metadata job runs in parallel as an informational step.
-# After build the jobs in { } run in parallel; none gates another, so a
-# PR surfaces every failure (-> denotes sequence):
-#   build -> { tests | audit | sbom -> grype }
+# Runs on pull requests and Gerrit patch sets. The repository-metadata
+# job runs in parallel as an informational step. After the build, the
+# jobs in { } run in parallel; none gates another, so a change surfaces
+# every failure at once (-> denotes sequence):
+#   rust-metadata -> build -> { tests | audit | sbom -> grype | cbom }
 #
-# Steps marked "# TEMPLATE:" are placeholders. When instantiating this
-# template for a language, replace them with the real build/test/audit/
-# SBOM actions; the surrounding job graph, harden-runner wiring, dual
-# checkout and Grype scan are generic and transfer as-is.
+# rust-metadata resolves one exact toolchain for the run, the test
+# matrix and the runners matrix (docs/BRIEF.md Q3, Q6, D4). build and
+# tests run once per runner; tests also once per toolchain leg. audit,
+# sbom and grype run once: the lockfile they read is the same on every
+# platform.
 #
 # Call this from a thin caller workflow; see examples/build-test/ for
-# both a plain GitHub-native caller and a Gerrit-wrapped caller.
-name: '[R] Build/Test (Template)'
+# a plain GitHub-native caller and a Gerrit-wrapped caller.
+name: '[R] Rust Build/Test'
 
 # yamllint disable-line rule:truthy
 on:
@@ -30,70 +31,302 @@ on:
         type: string
         default: ''
       ref:
-        description: 'Branch/tag/SHA to check out (empty = default branch)'
+        description: 'Branch/tag/SHA to check out (empty = event ref)'
         required: false
         type: string
         default: ''
 
-      # --- Project layout ---
+      # --- Project selection ---
       path_prefix:
-        description: 'Path to the project root directory'
+        description: 'Directory holding the project'
         required: false
         type: string
         default: '.'
-
-      # --- Tests ---
-      test_permit_fail:
-        description: 'Permit test failures without failing the workflow'
+      manifest_path:
+        description: 'Cargo.toml to act on, relative to path_prefix'
+        required: false
+        type: string
+        default: 'Cargo.toml'
+      workspace:
+        description: 'Act on every workspace member (--workspace)'
+        required: false
+        type: boolean
+        default: true
+      packages:
+        description: 'Whitespace-separated packages; replaces workspace'
+        required: false
+        type: string
+        default: ''
+      exclude:
+        description: 'Members to skip; needs workspace and no packages'
+        required: false
+        type: string
+        default: ''
+      features:
+        description: 'Features to enable, separated by spaces or commas'
+        required: false
+        type: string
+        default: ''
+      all_features:
+        description: 'Enable every feature (--all-features)'
+        required: false
+        type: boolean
+        default: false
+      no_default_features:
+        description: 'Disable default features (--no-default-features)'
         required: false
         type: boolean
         default: false
 
+      # --- Toolchain and environment ---
+      toolchain:
+        description: >-
+          Toolchain for every job. Empty uses the project's toolchain
+          file, or stable without one. A moving channel resolves to an
+          exact release once per run.
+        required: false
+        type: string
+        default: ''
+      lockfile_required:
+        description: >-
+          Fail when the project commits no Cargo.lock. When false, the
+          run resolves one and every job reads that graph.
+        required: false
+        type: boolean
+        default: false
+      setup_script:
+        description: >-
+          Committed script, relative to path_prefix, run with bash
+          before cargo in the build and test jobs (native libraries)
+        required: false
+        type: string
+        default: ''
+      runners:
+        description: >-
+          JSON array of {runner, arch} objects; build and tests run once
+          per entry. 'arch' names the artefacts.
+        required: false
+        type: string
+        default: '[{"runner": "ubuntu-latest", "arch": "x64"}]'
+      cache:
+        description: >-
+          Restore and save a Cargo cache in the build and test jobs.
+          The release and merge lanes never restore one.
+        required: false
+        type: boolean
+        default: false
+
+      # --- Build ---
+      target:
+        description: 'Target triple to build for; empty builds for the host'
+        required: false
+        type: string
+        default: ''
+      profile:
+        description: 'Cargo profile: dev, release or a custom profile'
+        required: false
+        type: string
+        default: 'release'
+      cargo_args:
+        description: "Extra 'cargo build' arguments, split on whitespace"
+        required: false
+        type: string
+        default: ''
+      binaries:
+        description: 'Collect built binaries, with SHA256SUMS, as an artefact'
+        required: false
+        type: boolean
+        default: false
+      auditable:
+        description: "Build binaries with 'cargo auditable'; needs binaries"
+        required: false
+        type: boolean
+        default: false
+      build_timeout_minutes:
+        description: 'Timeout for each build job'
+        required: false
+        type: number
+        default: 20
+
+      # --- Tests ---
+      tests_enabled:
+        description: 'Run the test jobs (set false to skip)'
+        required: false
+        type: boolean
+        default: true
+      test_matrix:
+        description: >-
+          'project' tests the project toolchain; 'msrv' adds the declared
+          rust-version; 'full' adds recent stable minors and stable.
+        required: false
+        type: string
+        default: 'msrv'
+      test_runner:
+        description: "'cargo' (cargo test) or 'nextest' (cargo nextest run)"
+        required: false
+        type: string
+        default: 'cargo'
+      test_args:
+        description: 'Extra test runner arguments, split on whitespace'
+        required: false
+        type: string
+        default: ''
+      doc_tests:
+        description: 'Run doc tests'
+        required: false
+        type: boolean
+        default: true
+      coverage:
+        description: 'Measure coverage with cargo-llvm-cov (project leg)'
+        required: false
+        type: boolean
+        default: false
+      test_permit_fail:
+        description: >-
+          Permit test failures without failing the job. When false,
+          falls back to the NO_BLOCK_AUDIT_FAIL repository variable.
+        required: false
+        type: boolean
+        default: false
+      test_timeout_minutes:
+        description: 'Timeout for each test job'
+        required: false
+        type: number
+        default: 20
+
       # --- Audit ---
       audit_enabled:
-        description: 'Run the dependency audit job (set false to skip)'
+        description: 'Run the cargo-audit job (set false to skip)'
         required: false
         type: boolean
         default: true
       audit_permit_fail:
-        description: 'Permit dependency audit failures (the NO_BLOCK pattern)'
+        description: >-
+          Permit audit failures without failing the job. When false,
+          falls back to the NO_BLOCK_AUDIT_FAIL repository variable.
         required: false
         type: boolean
         default: false
+      audit_ignore_vulns:
+        description: 'RUSTSEC advisory IDs to ignore, whitespace-separated'
+        required: false
+        type: string
+        default: ''
+      audit_allow_list_path:
+        description: 'File of RUSTSEC IDs to ignore, relative to path_prefix'
+        required: false
+        type: string
+        default: ''
+      deny_enabled:
+        description: 'Also run cargo-deny in the audit job'
+        required: false
+        type: boolean
+        default: false
+      deny_checks:
+        description: 'cargo-deny checks: advisories bans licenses sources'
+        required: false
+        type: string
+        default: 'advisories bans licenses sources'
+      audit_timeout_minutes:
+        description: 'Timeout for the audit, SBOM and Grype jobs'
+        required: false
+        type: number
+        default: 10
 
       # --- SBOM ---
       sbom_enabled:
         description: >-
           Generate an SBOM (set false to skip). The Grype job scans the
-          SBOM, so skipping generation leaves it nothing to scan and it
-          is skipped too. To keep the SBOM but drop the scan, use
-          grype_enabled instead.
+          SBOM, so skipping generation skips the scan too. To keep the
+          SBOM but drop the scan, use grype_enabled instead.
         required: false
         type: boolean
         default: true
+      sbom_format:
+        description: "SBOM output format: 'json', 'xml' or 'both'"
+        required: false
+        type: string
+        default: 'both'
+      sbom_include_dev:
+        description: >-
+          Include development dependencies. The syft backend this lane
+          uses reads Cargo.lock, which records no scope, so it lists
+          every locked crate either way.
+        required: false
+        type: boolean
+        default: false
 
       # --- Grype scan ---
       grype_enabled:
         description: >-
-          Run the Grype vulnerability scan over the generated SBOM (set
-          false to skip). Decoupling is one-way: disabling the scan
-          keeps the SBOM, but disabling the SBOM also stops the scan,
-          which has nothing to read.
+          Run the Grype vulnerability scan over the SBOM (set false to
+          skip). Disabling the scan keeps the SBOM; disabling the SBOM
+          also stops the scan, which has nothing to read.
         required: false
         type: boolean
         default: true
       grype_fail_on:
-        description: 'Minimum severity that fails the Grype scan'
+        description: >-
+          Lowest severity that fails the scan: negligible, low, medium,
+          high or critical; 'none' reports without gating
         required: false
         type: string
         default: 'medium'
       grype_permit_fail:
         description: >-
-          Permit Grype findings without failing the job. When false, falls
-          back to the NO_BLOCK_AUDIT_FAIL repository variable at runtime.
+          Report Grype findings without failing the job. When false,
+          falls back to the NO_BLOCK_AUDIT_FAIL repository variable.
         required: false
         type: boolean
         default: false
+      grype_gate_when:
+        description: >-
+          'always' gates on every scan. 'dependencies-changed' gates
+          only when the change touches Cargo.toml, Cargo.lock or Cargo
+          configuration, and otherwise reports findings as warnings.
+        required: false
+        type: string
+        default: 'always'
+      grype_only_fixed:
+        description: 'Report only vulnerabilities that have a fix'
+        required: false
+        type: boolean
+        default: false
+      grype_cache_db:
+        description: "Grype database cache: 'true', 'false' or 'restore-only'"
+        required: false
+        type: string
+        default: 'true'
+
+      # --- CBOM (advisory) ---
+      cbom_enabled:
+        description: >-
+          Generate a cryptography bill of materials. cbom-action cannot
+          analyse Rust yet; it scans any Java, Python or Go sources in
+          the project and skips a Rust-only project.
+        required: false
+        type: boolean
+        default: false
+      cbom_languages:
+        description: "cbom-action languages; empty auto-detects. Never 'rust'"
+        required: false
+        type: string
+        default: ''
+      cbom_timeout_minutes:
+        description: 'Timeout for the CBOM job'
+        required: false
+        type: number
+        default: 30
+
+      # --- Artefacts ---
+      artefact_suffix:
+        description: >-
+          Suffix for every artefact this run uploads, such as '-core',
+          so several calls in one workflow run cannot clash: empty, or
+          '-' and up to 64 letters, digits, '.', '_' or '-'
+        required: false
+        type: string
+        default: ''
 
       # --- Runner hardening ---
       harden_runner_egress:
@@ -106,7 +339,7 @@ on:
         required: false
         type: string
         # yamllint disable-line rule:line-length
-        default: 'lfreleng-actions//.github/harden-runner/lfreleng-actions/allow_list.txt@f0f76ac22f342c9a788ebcabe584e68a79cc2e83'  # v0.16.0
+        default: 'lfreleng-actions//.github/harden-runner/lfreleng-actions/allow_list.txt@93962991c9e4cc04d77d81e619475c868a226277'  # v0.17.0
 
       # --- Gerrit-aware checkout (empty unless dispatched via Gerrit) ---
       gerrit_refspec:
@@ -136,13 +369,11 @@ permissions: {}
 
 jobs:
   gerrit-validate:
-    name: 'Validate Gerrit Inputs'
-    # Fails fast with a clear message when gerrit_refspec is set without
-    # the project/branch the Gerrit checkout path also requires. The
-    # build-chain root job depends on this, so invalid Gerrit inputs stop
-    # the pipeline early and cleanly. This job always runs (only the
-    # validation step is conditional), so gating dependents on it does
-    # not trip GitHub's "skipped need skips dependents" behaviour.
+    name: 'Validate Inputs'
+    # Fails fast with a clear message on inputs the jobs would otherwise
+    # reject one by one, in every matrix leg. This job always runs (only
+    # its steps are conditional), so gating dependents on it does not
+    # trip GitHub's "skipped need skips dependents" behaviour.
     runs-on: ubuntu-latest
     permissions: {}
     timeout-minutes: 2
@@ -156,9 +387,7 @@ jobs:
           # yamllint disable-line rule:line-length
           GERRIT_URL: ${{ inputs.gerrit_url != '' && inputs.gerrit_url || vars.GERRIT_URL }}
         run: |
-          # gerrit_refspec is set, so the Gerrit checkout path runs and
-          # also requires gerrit_project, gerrit_branch and a resolvable
-          # Gerrit URL (the gerrit_url input or the GERRIT_URL variable).
+          # Require Gerrit project, branch and URL
           missing=''
           if [ -z "${GERRIT_PROJECT}" ]; then
             missing="${missing} gerrit_project"
@@ -175,6 +404,48 @@ jobs:
           fi
           echo "Gerrit inputs validated ✅"
 
+      - name: 'Check the enumerated inputs'
+        shell: bash
+        env:
+          TEST_RUNNER: ${{ inputs.test_runner }}
+          ARTEFACT_SUFFIX: ${{ inputs.artefact_suffix }}
+          SBOM_FORMAT: ${{ inputs.sbom_format }}
+          GRYPE_FAIL_ON: ${{ inputs.grype_fail_on }}
+          GRYPE_GATE_WHEN: ${{ inputs.grype_gate_when }}
+          GRYPE_CACHE_DB: ${{ inputs.grype_cache_db }}
+          CBOM_LANGUAGES: ${{ inputs.cbom_languages }}
+        run: |
+          # Check the enumerated inputs
+          failed=0
+          check() {
+            local name="$1" value="$2" allowed=" $3 "
+            case "$allowed" in
+              *" $value "*) ;;
+              *)
+                echo "::error::$name: expected one of:$allowed"
+                failed=1 ;;
+            esac
+          }
+          check test_runner "$TEST_RUNNER" 'cargo nextest'
+          check sbom_format "$SBOM_FORMAT" 'json xml both'
+          check grype_fail_on "$GRYPE_FAIL_ON" \
+            'negligible low medium high critical none'
+          check grype_gate_when "$GRYPE_GATE_WHEN" \
+            'always dependencies-changed'
+          check grype_cache_db "$GRYPE_CACHE_DB" 'true false restore-only'
+          case ",${CBOM_LANGUAGES// /}," in
+            *,rust,*)
+              echo "::error::cbom_languages: cbom-action cannot" \
+                "analyse Rust; leave it out"
+              failed=1 ;;
+          esac
+          if ! [[ "$ARTEFACT_SUFFIX" =~ ^(-[A-Za-z0-9._-]{1,64})?$ ]]; then
+            echo "::error::artefact_suffix: expected '' or '-' and up to" \
+              "64 of A-Z a-z 0-9 . _ -"
+            failed=1
+          fi
+          exit "$failed"
+
   repository-metadata:
     name: 'Repository Metadata'
     needs: gerrit-validate
@@ -186,12 +457,13 @@ jobs:
     steps:
       - name: 'Load egress allow-list'
         # yamllint disable-line rule:line-length
-        uses: lfreleng-actions/harden-runner-block-action@a32eb064a1188f6b0f15d2c0c0381efe54b0dd22  # v0.12.2
+        uses: lfreleng-actions/harden-runner-block-action@51ef68401547a8b648275129b9a21544612596d5  # v0.13.1
         with:
           config: ${{ inputs.harden_runner_allowlist }}
+          allow_list_summary: 'false'
       - name: 'Harden runner'
         # yamllint disable-line rule:line-length
-        uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1  # v2.21.1
+        uses: step-security/harden-runner@ccd8616d44fd3846e67624a50d5aad6d37bf2d25  # v2.22.1
         with:
           # yamllint disable-line rule:line-length
           egress-policy: ${{ inputs.harden_runner_egress == 'audit' && 'audit' || 'block' }}
@@ -201,7 +473,7 @@ jobs:
       - name: 'Checkout Gerrit change'
         if: inputs.gerrit_refspec != ''
         # yamllint disable-line rule:line-length
-        uses: lfreleng-actions/checkout-gerrit-change-action@298f53bbbc1d5f9e54df9feb484d110dc2b33197  # v1.1.0
+        uses: lfreleng-actions/checkout-gerrit-change-action@35e98c8043ec411611e464e296bcfb441a5c5093  # v1.1.2
         with:
           gerrit-refspec: ${{ inputs.gerrit_refspec }}
           gerrit-project: ${{ inputs.gerrit_project }}
@@ -223,7 +495,7 @@ jobs:
       - name: 'Gather repository metadata'
         id: repo-metadata
         # yamllint disable-line rule:line-length
-        uses: lfreleng-actions/repository-metadata-action@847400e0d0b34cc88a572fa9575accd80401b796  # v0.3.1
+        uses: lfreleng-actions/repository-metadata-action@b2078d32ca207a0e110b2157a95271a35688c8e7  # v0.3.2
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           github_summary: 'true'
@@ -231,25 +503,53 @@ jobs:
           artifact_upload: 'true'
           artifact_formats: 'json'
 
-  build:
-    name: 'Build'
+  rust-metadata:
+    name: 'Rust Metadata'
     needs: gerrit-validate
-    runs-on: ubuntu-latest
-    outputs:
-      artefact_name: ${{ steps.build.outputs.artefact_name }}
-      artefact_path: ${{ steps.build.outputs.artefact_path }}
     permissions:
       contents: read
-    timeout-minutes: 10
+    uses: $/.github/workflows/rust-metadata.yaml
+    with:
+      repository: ${{ inputs.repository }}
+      ref: ${{ inputs.ref }}
+      path_prefix: ${{ inputs.path_prefix }}
+      manifest_path: ${{ inputs.manifest_path }}
+      workspace: ${{ inputs.workspace }}
+      packages: ${{ inputs.packages }}
+      exclude: ${{ inputs.exclude }}
+      toolchain: ${{ inputs.toolchain }}
+      test_matrix: ${{ inputs.test_matrix }}
+      runners: ${{ inputs.runners }}
+      lockfile_required: ${{ inputs.lockfile_required }}
+      harden_runner_egress: ${{ inputs.harden_runner_egress }}
+      harden_runner_allowlist: ${{ inputs.harden_runner_allowlist }}
+      gerrit_refspec: ${{ inputs.gerrit_refspec }}
+      gerrit_project: ${{ inputs.gerrit_project }}
+      gerrit_branch: ${{ inputs.gerrit_branch }}
+      gerrit_url: ${{ inputs.gerrit_url }}
+      artefact_suffix: ${{ inputs.artefact_suffix }}
+
+  build:
+    name: 'Build (${{ matrix.platform.arch }})'
+    needs: rust-metadata
+    strategy:
+      fail-fast: false
+      matrix:
+        platform: ${{ fromJSON(needs.rust-metadata.outputs.runners) }}
+    runs-on: ${{ matrix.platform.runner }}
+    permissions:
+      contents: read
+    timeout-minutes: ${{ inputs.build_timeout_minutes }}
     steps:
       - name: 'Load egress allow-list'
         # yamllint disable-line rule:line-length
-        uses: lfreleng-actions/harden-runner-block-action@a32eb064a1188f6b0f15d2c0c0381efe54b0dd22  # v0.12.2
+        uses: lfreleng-actions/harden-runner-block-action@51ef68401547a8b648275129b9a21544612596d5  # v0.13.1
         with:
           config: ${{ inputs.harden_runner_allowlist }}
+          allow_list_summary: 'false'
       - name: 'Harden runner'
         # yamllint disable-line rule:line-length
-        uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1  # v2.21.1
+        uses: step-security/harden-runner@ccd8616d44fd3846e67624a50d5aad6d37bf2d25  # v2.22.1
         with:
           # yamllint disable-line rule:line-length
           egress-policy: ${{ inputs.harden_runner_egress == 'audit' && 'audit' || 'block' }}
@@ -259,7 +559,7 @@ jobs:
       - name: 'Checkout Gerrit change'
         if: inputs.gerrit_refspec != ''
         # yamllint disable-line rule:line-length
-        uses: lfreleng-actions/checkout-gerrit-change-action@298f53bbbc1d5f9e54df9feb484d110dc2b33197  # v1.1.0
+        uses: lfreleng-actions/checkout-gerrit-change-action@35e98c8043ec411611e464e296bcfb441a5c5093  # v1.1.2
         with:
           gerrit-refspec: ${{ inputs.gerrit_refspec }}
           gerrit-project: ${{ inputs.gerrit_project }}
@@ -277,59 +577,84 @@ jobs:
           ref: ${{ inputs.ref }}
           persist-credentials: false
 
-      # TEMPLATE: Replace this placeholder with your language build
-      # action, keeping the step id and the artefact_name/artefact_path
-      # outputs so downstream jobs continue to work, e.g.:
-      #   - name: 'Build project'
-      #     id: build
-      #     uses: lfreleng-actions/<lang>-build-action@<SHA>  # vX.Y.Z
-      #     with:
-      #       path_prefix: ${{ inputs.path_prefix }}
-      - name: 'Build project (placeholder)'
-        id: build
-        shell: bash
-        env:
-          PATH_PREFIX: ${{ inputs.path_prefix }}
-        run: |
-          # TEMPLATE: placeholder build step; produces a trivial text
-          # artefact so the artifact plumbing can be exercised.
-          cd "${PATH_PREFIX}"
-          mkdir -p dist
-          {
-            echo "workflows-template placeholder build artefact"
-            echo "repository: ${GITHUB_REPOSITORY}"
-            echo "ref: ${GITHUB_REF}"
-            echo "sha: ${GITHUB_SHA}"
-            echo "run_id: ${GITHUB_RUN_ID}"
-          } > dist/template-artefact.txt
-          echo "artefact_name=template-build" >> "$GITHUB_OUTPUT"
-          echo "artefact_path=${PATH_PREFIX}/dist" >> "$GITHUB_OUTPUT"
-
-      - name: 'Upload build artefact'
+      - name: 'Restore the resolved lockfile'
+        if: needs.rust-metadata.outputs.lockfile_generated == 'true'
         # yamllint disable-line rule:line-length
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8.0.2
         with:
-          name: ${{ steps.build.outputs.artefact_name }}
-          path: ${{ steps.build.outputs.artefact_path }}
-          if-no-files-found: error
+          name: ${{ needs.rust-metadata.outputs.lockfile_artefact }}
+          path: ${{ needs.rust-metadata.outputs.lockfile_dir }}
+
+      - name: 'Restore the Cargo cache'
+        if: inputs.cache
+        # yamllint disable-line rule:line-length
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            ${{ needs.rust-metadata.outputs.lockfile_dir }}/target
+          # yamllint disable rule:line-length
+          key: rust-build-${{ matrix.platform.arch }}-${{ needs.rust-metadata.outputs.toolchain }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            rust-build-${{ matrix.platform.arch }}-${{ needs.rust-metadata.outputs.toolchain }}-
+          # yamllint enable rule:line-length
+
+      - name: 'Build'
+        id: build
+        # yamllint disable-line rule:line-length
+        uses: lfreleng-actions/rust-build-action@b1d7fdb06b77e4f6f83a0c9aa4369749b7dbfc1e  # v0.0.2
+        with:
+          path_prefix: ${{ inputs.path_prefix }}
+          manifest_path: ${{ inputs.manifest_path }}
+          workspace: ${{ inputs.workspace }}
+          packages: ${{ inputs.packages }}
+          exclude: ${{ inputs.exclude }}
+          features: ${{ inputs.features }}
+          all_features: ${{ inputs.all_features }}
+          no_default_features: ${{ inputs.no_default_features }}
+          toolchain: ${{ needs.rust-metadata.outputs.toolchain }}
+          # yamllint disable-line rule:line-length
+          toolchain_components: ${{ needs.rust-metadata.outputs.toolchain_components }}
+          # yamllint disable-line rule:line-length
+          toolchain_targets: ${{ needs.rust-metadata.outputs.toolchain_targets }}
+          lockfile_required: ${{ inputs.lockfile_required }}
+          setup_script: ${{ inputs.setup_script }}
+          target: ${{ inputs.target }}
+          profile: ${{ inputs.profile }}
+          cargo_args: ${{ inputs.cargo_args }}
+          binaries: ${{ inputs.binaries }}
+          auditable: ${{ inputs.auditable }}
+          # yamllint disable-line rule:line-length
+          artefact_name: rust-build-${{ matrix.platform.arch }}${{ inputs.artefact_suffix }}
 
   tests:
-    name: 'Tests'
-    runs-on: ubuntu-latest
-    needs: 'build'
-    if: ${{ !cancelled() && needs.build.result == 'success' }}
+    name: 'Tests (${{ matrix.platform.arch }}, ${{ matrix.rust.label }})'
+    needs:
+      - rust-metadata
+      - build
+    # yamllint disable-line rule:line-length
+    if: ${{ !cancelled() && needs.build.result == 'success' && inputs.tests_enabled }}
+    strategy:
+      fail-fast: false
+      matrix:
+        platform: ${{ fromJSON(needs.rust-metadata.outputs.runners) }}
+        rust: ${{ fromJSON(needs.rust-metadata.outputs.test_matrix) }}
+    runs-on: ${{ matrix.platform.runner }}
     permissions:
       contents: read
-    timeout-minutes: 10
+    timeout-minutes: ${{ inputs.test_timeout_minutes }}
     steps:
       - name: 'Load egress allow-list'
         # yamllint disable-line rule:line-length
-        uses: lfreleng-actions/harden-runner-block-action@a32eb064a1188f6b0f15d2c0c0381efe54b0dd22  # v0.12.2
+        uses: lfreleng-actions/harden-runner-block-action@51ef68401547a8b648275129b9a21544612596d5  # v0.13.1
         with:
           config: ${{ inputs.harden_runner_allowlist }}
+          allow_list_summary: 'false'
       - name: 'Harden runner'
         # yamllint disable-line rule:line-length
-        uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1  # v2.21.1
+        uses: step-security/harden-runner@ccd8616d44fd3846e67624a50d5aad6d37bf2d25  # v2.22.1
         with:
           # yamllint disable-line rule:line-length
           egress-policy: ${{ inputs.harden_runner_egress == 'audit' && 'audit' || 'block' }}
@@ -339,7 +664,7 @@ jobs:
       - name: 'Checkout Gerrit change'
         if: inputs.gerrit_refspec != ''
         # yamllint disable-line rule:line-length
-        uses: lfreleng-actions/checkout-gerrit-change-action@298f53bbbc1d5f9e54df9feb484d110dc2b33197  # v1.1.0
+        uses: lfreleng-actions/checkout-gerrit-change-action@35e98c8043ec411611e464e296bcfb441a5c5093  # v1.1.2
         with:
           gerrit-refspec: ${{ inputs.gerrit_refspec }}
           gerrit-project: ${{ inputs.gerrit_project }}
@@ -357,53 +682,82 @@ jobs:
           ref: ${{ inputs.ref }}
           persist-credentials: false
 
-      # TEMPLATE: Replace this placeholder with your language test
-      # action. Pass test_permit_fail through to the action's own
-      # permit_fail input where available, e.g.:
-      #   - name: 'Run tests'
-      #     uses: lfreleng-actions/<lang>-test-action@<SHA>  # vX.Y.Z
-      #     with:
-      #       path_prefix: ${{ inputs.path_prefix }}
-      #       permit_fail: ${{ inputs.test_permit_fail }}
-      - name: 'Run tests (placeholder)'
-        shell: bash
-        env:
-          # The NO_BLOCK/soft-fail pattern: the test_permit_fail input
-          # (or, when unset, the NO_BLOCK_AUDIT_FAIL repository
-          # variable) disables failure propagation.
+      - name: 'Restore the resolved lockfile'
+        if: needs.rust-metadata.outputs.lockfile_generated == 'true'
+        # yamllint disable-line rule:line-length
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8.0.2
+        with:
+          name: ${{ needs.rust-metadata.outputs.lockfile_artefact }}
+          path: ${{ needs.rust-metadata.outputs.lockfile_dir }}
+
+      - name: 'Restore the Cargo cache'
+        if: inputs.cache
+        # yamllint disable-line rule:line-length
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            ${{ needs.rust-metadata.outputs.lockfile_dir }}/target
+          # yamllint disable rule:line-length
+          key: rust-tests-${{ matrix.platform.arch }}-${{ matrix.rust.toolchain }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            rust-tests-${{ matrix.platform.arch }}-${{ matrix.rust.toolchain }}-
+          # yamllint enable rule:line-length
+
+      - name: 'Run tests'
+        # yamllint disable-line rule:line-length
+        uses: lfreleng-actions/rust-test-action@8e69a16038a3c4d0cf710c81039094b0ad9feb40  # v0.0.1
+        with:
+          path_prefix: ${{ inputs.path_prefix }}
+          manifest_path: ${{ inputs.manifest_path }}
+          workspace: ${{ inputs.workspace }}
+          packages: ${{ inputs.packages }}
+          exclude: ${{ inputs.exclude }}
+          features: ${{ inputs.features }}
+          all_features: ${{ inputs.all_features }}
+          no_default_features: ${{ inputs.no_default_features }}
+          toolchain: ${{ matrix.rust.toolchain }}
           # yamllint disable-line rule:line-length
-          NO_BLOCK: ${{ inputs.test_permit_fail || vars.NO_BLOCK_AUDIT_FAIL == 'true' }}
-        run: |
-          # TEMPLATE: placeholder test step; replace with real tests.
-          status=0
-          echo "Placeholder tests executed"
-          if [ "${status}" != "0" ]; then
-            if [ "${NO_BLOCK}" = "true" ]; then
-              echo "::warning::Tests failed, but failures are" \
-                "permitted so the job will not fail."
-              exit 0
-            fi
-            exit "${status}"
-          fi
+          toolchain_components: ${{ needs.rust-metadata.outputs.toolchain_components }}
+          # yamllint disable-line rule:line-length
+          toolchain_targets: ${{ needs.rust-metadata.outputs.toolchain_targets }}
+          lockfile_required: ${{ inputs.lockfile_required }}
+          setup_script: ${{ inputs.setup_script }}
+          test_runner: ${{ inputs.test_runner }}
+          test_args: ${{ inputs.test_args }}
+          doc_tests: ${{ inputs.doc_tests }}
+          # Coverage on the project toolchain alone: one report per
+          # platform, measured with the compiler the project ships.
+          # yamllint disable-line rule:line-length
+          coverage: ${{ inputs.coverage && matrix.rust.label == 'project' }}
+          # yamllint disable-line rule:line-length
+          artefact_name: rust-test-results-${{ matrix.platform.arch }}-${{ matrix.rust.label }}${{ inputs.artefact_suffix }}
+          # yamllint disable-line rule:line-length
+          permit_fail: ${{ inputs.test_permit_fail || vars.NO_BLOCK_AUDIT_FAIL == 'true' }}
 
   audit:
     name: 'Audit Dependencies'
-    runs-on: ubuntu-latest
-    needs: 'build'
+    needs:
+      - rust-metadata
+      - build
     # yamllint disable-line rule:line-length
     if: ${{ !cancelled() && needs.build.result == 'success' && inputs.audit_enabled }}
+    runs-on: ubuntu-latest
     permissions:
       contents: read
-    timeout-minutes: 10
+    timeout-minutes: ${{ inputs.audit_timeout_minutes }}
     steps:
       - name: 'Load egress allow-list'
         # yamllint disable-line rule:line-length
-        uses: lfreleng-actions/harden-runner-block-action@a32eb064a1188f6b0f15d2c0c0381efe54b0dd22  # v0.12.2
+        uses: lfreleng-actions/harden-runner-block-action@51ef68401547a8b648275129b9a21544612596d5  # v0.13.1
         with:
           config: ${{ inputs.harden_runner_allowlist }}
+          allow_list_summary: 'false'
       - name: 'Harden runner'
         # yamllint disable-line rule:line-length
-        uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1  # v2.21.1
+        uses: step-security/harden-runner@ccd8616d44fd3846e67624a50d5aad6d37bf2d25  # v2.22.1
         with:
           # yamllint disable-line rule:line-length
           egress-policy: ${{ inputs.harden_runner_egress == 'audit' && 'audit' || 'block' }}
@@ -413,7 +767,7 @@ jobs:
       - name: 'Checkout Gerrit change'
         if: inputs.gerrit_refspec != ''
         # yamllint disable-line rule:line-length
-        uses: lfreleng-actions/checkout-gerrit-change-action@298f53bbbc1d5f9e54df9feb484d110dc2b33197  # v1.1.0
+        uses: lfreleng-actions/checkout-gerrit-change-action@35e98c8043ec411611e464e296bcfb441a5c5093  # v1.1.2
         with:
           gerrit-refspec: ${{ inputs.gerrit_refspec }}
           gerrit-project: ${{ inputs.gerrit_project }}
@@ -431,68 +785,70 @@ jobs:
           ref: ${{ inputs.ref }}
           persist-credentials: false
 
-      # TEMPLATE: Replace this placeholder with your language dependency
-      # audit action, e.g.:
-      #   - name: 'Audit dependencies'
-      #     uses: lfreleng-actions/<lang>-audit-action@<SHA>  # vX.Y.Z
-      #     with:
-      #       path_prefix: ${{ inputs.path_prefix }}
-      #       permit_fail: ${{ inputs.audit_permit_fail }}
-      - name: 'Audit dependencies (placeholder)'
-        shell: bash
-        env:
-          # The NO_BLOCK/soft-fail pattern: the audit_permit_fail input
-          # (or, when unset, the NO_BLOCK_AUDIT_FAIL repository
-          # variable) disables failure propagation.
+      - name: 'Restore the resolved lockfile'
+        if: needs.rust-metadata.outputs.lockfile_generated == 'true'
+        # yamllint disable-line rule:line-length
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8.0.2
+        with:
+          name: ${{ needs.rust-metadata.outputs.lockfile_artefact }}
+          path: ${{ needs.rust-metadata.outputs.lockfile_dir }}
+
+      - name: 'Audit dependencies'
+        # yamllint disable-line rule:line-length
+        uses: lfreleng-actions/rust-audit-action@fa19bd4be915071d8c6fdf3d51b95a754fa79e1d  # v0.0.1
+        with:
+          path_prefix: ${{ inputs.path_prefix }}
+          manifest_path: ${{ inputs.manifest_path }}
+          toolchain: ${{ needs.rust-metadata.outputs.toolchain }}
+          lockfile_required: ${{ inputs.lockfile_required }}
+          ignore_vulns: ${{ inputs.audit_ignore_vulns }}
+          allow_list_path: ${{ inputs.audit_allow_list_path }}
+          deny_enabled: ${{ inputs.deny_enabled }}
+          deny_checks: ${{ inputs.deny_checks }}
+          artefact_name: rust-audit-results${{ inputs.artefact_suffix }}
           # yamllint disable-line rule:line-length
-          NO_BLOCK: ${{ inputs.audit_permit_fail || vars.NO_BLOCK_AUDIT_FAIL == 'true' }}
-        run: |
-          # TEMPLATE: placeholder audit step; replace with real audit.
-          status=0
-          echo "Placeholder dependency audit executed"
-          if [ "${status}" != "0" ]; then
-            if [ "${NO_BLOCK}" = "true" ]; then
-              echo "::warning::Audit failed, but failures are" \
-                "permitted so the job will not fail."
-              exit 0
-            fi
-            exit "${status}"
-          fi
+          permit_fail: ${{ inputs.audit_permit_fail || vars.NO_BLOCK_AUDIT_FAIL == 'true' }}
 
   sbom:
     name: 'Generate SBOM'
-    runs-on: ubuntu-latest
-    needs: 'build'
+    needs:
+      - rust-metadata
+      - build
     # yamllint disable-line rule:line-length
     if: ${{ !cancelled() && needs.build.result == 'success' && inputs.sbom_enabled }}
-    timeout-minutes: 10
+    runs-on: ubuntu-latest
     permissions:
       contents: read
+    timeout-minutes: ${{ inputs.audit_timeout_minutes }}
     steps:
       - name: 'Load egress allow-list'
         # yamllint disable-line rule:line-length
-        uses: lfreleng-actions/harden-runner-block-action@a32eb064a1188f6b0f15d2c0c0381efe54b0dd22  # v0.12.2
+        uses: lfreleng-actions/harden-runner-block-action@51ef68401547a8b648275129b9a21544612596d5  # v0.13.1
         with:
           config: ${{ inputs.harden_runner_allowlist }}
+          allow_list_summary: 'false'
       - name: 'Harden runner'
         # yamllint disable-line rule:line-length
-        uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1  # v2.21.1
+        uses: step-security/harden-runner@ccd8616d44fd3846e67624a50d5aad6d37bf2d25  # v2.22.1
         with:
           # yamllint disable-line rule:line-length
           egress-policy: ${{ inputs.harden_runner_egress == 'audit' && 'audit' || 'block' }}
           allowed-endpoints: >
             ${{ env.CONNECTION_ALLOW_LIST }}
 
+      # Depth 2 on both paths: the dependency-change check compares the
+      # commit under test with its first parent.
       - name: 'Checkout Gerrit change'
         if: inputs.gerrit_refspec != ''
         # yamllint disable-line rule:line-length
-        uses: lfreleng-actions/checkout-gerrit-change-action@298f53bbbc1d5f9e54df9feb484d110dc2b33197  # v1.1.0
+        uses: lfreleng-actions/checkout-gerrit-change-action@35e98c8043ec411611e464e296bcfb441a5c5093  # v1.1.2
         with:
           gerrit-refspec: ${{ inputs.gerrit_refspec }}
           gerrit-project: ${{ inputs.gerrit_project }}
           # yamllint disable-line rule:line-length
           gerrit-url: ${{ inputs.gerrit_url != '' && inputs.gerrit_url || vars.GERRIT_URL }}
           delay: '0s'
+          fetch-depth: '2'
           repository: ${{ inputs.repository || github.repository }}
           ref: refs/heads/${{ inputs.gerrit_branch }}
       - name: 'Checkout repository'
@@ -502,71 +858,88 @@ jobs:
         with:
           repository: ${{ inputs.repository || github.repository }}
           ref: ${{ inputs.ref }}
+          fetch-depth: 2
           persist-credentials: false
 
-      # TEMPLATE: Replace this placeholder with your language SBOM
-      # action. It MUST emit sbom-cyclonedx.json at the workspace root
-      # (the Grype job contract), e.g.:
-      #   - name: 'Generate SBOM'
-      #     uses: lfreleng-actions/<lang>-sbom-action@<SHA>  # vX.Y.Z
-      #     with:
-      #       path_prefix: ${{ inputs.path_prefix }}
-      # The placeholder writes a minimal VALID empty CycloneDX document
-      # so the downstream Grype scan stays fully functional.
-      - name: 'Generate SBOM (placeholder)'
-        shell: bash
-        run: |
-          # TEMPLATE: placeholder SBOM step; replace with a real SBOM
-          # generator emitting sbom-cyclonedx.json.
-          cat > sbom-cyclonedx.json <<'EOF'
-          {
-            "bomFormat": "CycloneDX",
-            "specVersion": "1.5",
-            "version": 1,
-            "components": []
-          }
-          EOF
-          echo "Wrote placeholder CycloneDX SBOM (0 components)"
-
-      - name: 'Upload SBOM artifacts'
+      - name: 'Restore the resolved lockfile'
+        if: needs.rust-metadata.outputs.lockfile_generated == 'true'
         # yamllint disable-line rule:line-length
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8.0.2
         with:
-          name: sbom-files
-          # Glob matches whichever SBOM formats the generator produced
-          path: sbom-cyclonedx.*
-          retention-days: 45
-          # Fail fast: the downstream Grype job requires this artifact,
-          # so a missing/misnamed SBOM must surface here, not later
-          if-no-files-found: error
+          name: ${{ needs.rust-metadata.outputs.lockfile_artefact }}
+          path: ${{ needs.rust-metadata.outputs.lockfile_dir }}
 
-      - name: 'SBOM summary'
+      # Syft reads Cargo.lock, which lives at the workspace root, so the
+      # SBOM describes the root rather than path_prefix.
+      - name: 'Generate SBOM'
+        id: sbom
+        # yamllint disable-line rule:line-length
+        uses: lfreleng-actions/sbom-action@398aec0a5f332a0414246a6d9d45678ef4a95e98  # v0.3.0
+        with:
+          backend: 'syft'
+          path_prefix: ${{ needs.rust-metadata.outputs.lockfile_dir }}
+          sbom_format: ${{ inputs.sbom_format }}
+          include_dev: ${{ inputs.sbom_include_dev }}
+          output_directory: ${{ runner.temp }}/sbom
+
+      # grype-scan-action's 'dependencies-changed' gate reads this
+      # sidecar. A missing parent leaves it unwritten, and the action
+      # then gates: an unknown answer must not wave findings through.
+      - name: 'Record whether dependencies changed'
         shell: bash
+        env:
+          SBOM_DIR: ${{ runner.temp }}/sbom
         run: |
-          # SBOM summary
-          {
-            echo "## SBOM Summary"
-            echo "Placeholder CycloneDX SBOM (0 components)"
-          } >> "$GITHUB_STEP_SUMMARY"
+          # Record whether dependencies changed
+          set -euo pipefail
+          if ! git rev-parse --verify --quiet 'HEAD^1' > /dev/null; then
+            echo "::notice::No parent commit; dependency change unknown"
+            exit 0
+          fi
+          changed=false
+          while IFS= read -r file; do
+            case "$file" in
+              Cargo.toml | */Cargo.toml | Cargo.lock | */Cargo.lock \
+                | .cargo/config | .cargo/config.toml \
+                | */.cargo/config | */.cargo/config.toml)
+                changed=true ;;
+            esac
+          done < <(git diff --name-only 'HEAD^1' HEAD)
+          printf '{"changed": %s}\n' "$changed" \
+            > "$SBOM_DIR/dependency-change.json"
+          echo "Dependencies changed: $changed"
+
+      - name: 'Upload SBOM artefacts'
+        # yamllint disable-line rule:line-length
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
+        with:
+          name: sbom-files${{ inputs.artefact_suffix }}
+          path: ${{ runner.temp }}/sbom/
+          retention-days: 45
+          # The Grype job needs this artefact, so a missing SBOM must
+          # surface here rather than there.
+          if-no-files-found: error
 
   grype:
     name: 'Grype Audit SBOM'
-    runs-on: ubuntu-latest
-    needs: 'sbom'
+    needs: sbom
     # yamllint disable-line rule:line-length
     if: ${{ !cancelled() && needs.sbom.result == 'success' && inputs.grype_enabled }}
-    timeout-minutes: 10
+    runs-on: ubuntu-latest
     permissions:
       contents: read
+      issues: read  # Maintainer-approved cve-bypass issues
+    timeout-minutes: ${{ inputs.audit_timeout_minutes }}
     steps:
       - name: 'Load egress allow-list'
         # yamllint disable-line rule:line-length
-        uses: lfreleng-actions/harden-runner-block-action@a32eb064a1188f6b0f15d2c0c0381efe54b0dd22  # v0.12.2
+        uses: lfreleng-actions/harden-runner-block-action@51ef68401547a8b648275129b9a21544612596d5  # v0.13.1
         with:
           config: ${{ inputs.harden_runner_allowlist }}
+          allow_list_summary: 'false'
       - name: 'Harden runner'
         # yamllint disable-line rule:line-length
-        uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1  # v2.21.1
+        uses: step-security/harden-runner@ccd8616d44fd3846e67624a50d5aad6d37bf2d25  # v2.22.1
         with:
           # yamllint disable-line rule:line-length
           egress-policy: ${{ inputs.harden_runner_egress == 'audit' && 'audit' || 'block' }}
@@ -575,21 +948,99 @@ jobs:
 
       - name: 'Download SBOM artefact'
         # yamllint disable-line rule:line-length
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8.0.2
         with:
-          name: sbom-files
+          name: sbom-files${{ inputs.artefact_suffix }}
 
-      # The grype_permit_fail input (or, when unset, the NO_BLOCK_AUDIT_FAIL
-      # repository variable) disables failure propagation so pull requests
-      # can proceed when blocked by newly discovered CVEs in transitive
-      # dependencies.
+      # grype_permit_fail, or the NO_BLOCK_AUDIT_FAIL repository
+      # variable, keeps findings from failing the job, so a pull request
+      # can proceed while a newly published CVE in an untouched
+      # transitive dependency awaits a fix. grype_gate_when narrows the
+      # gate to changes that touch dependencies.
       - name: 'Grype audit SBOM'
         id: grype-audit
         # yamllint disable-line rule:line-length
         uses: lfreleng-actions/grype-scan-action@9a85f35a26a71dafb2fa23a6f83a640d526ee559  # v0.2.0
         with:
-          sbom: 'sbom-cyclonedx.json'
+          # The JSON document, or the XML one when that is all there is.
+          # yamllint disable-line rule:line-length
+          sbom: ${{ inputs.sbom_format == 'xml' && 'sbom-cyclonedx.xml' || 'sbom-cyclonedx.json' }}
           fail-on: ${{ inputs.grype_fail_on }}
+          only-fixed: ${{ inputs.grype_only_fixed }}
+          gate-when: ${{ inputs.grype_gate_when }}
+          dependency-change-manifest: 'dependency-change.json'
+          cache-db: ${{ inputs.grype_cache_db }}
           # yamllint disable-line rule:line-length
           permit-fail: ${{ inputs.grype_permit_fail || vars.NO_BLOCK_AUDIT_FAIL == 'true' }}
           github-token: ${{ secrets.GITHUB_TOKEN }}
+          artifact-name: grype-scan-results${{ inputs.artefact_suffix }}
+
+  cbom:
+    name: 'Generate CBOM'
+    needs: build
+    # yamllint disable-line rule:line-length
+    if: ${{ !cancelled() && needs.build.result == 'success' && inputs.cbom_enabled }}
+    # Advisory: findings, a scanner error or a timeout never fail the
+    # run, and no other job waits for this one.
+    continue-on-error: true
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    timeout-minutes: ${{ inputs.cbom_timeout_minutes }}
+    steps:
+      - name: 'Load egress allow-list'
+        # yamllint disable-line rule:line-length
+        uses: lfreleng-actions/harden-runner-block-action@51ef68401547a8b648275129b9a21544612596d5  # v0.13.1
+        with:
+          config: ${{ inputs.harden_runner_allowlist }}
+          allow_list_summary: 'false'
+      - name: 'Harden runner'
+        # yamllint disable-line rule:line-length
+        uses: step-security/harden-runner@ccd8616d44fd3846e67624a50d5aad6d37bf2d25  # v2.22.1
+        with:
+          # yamllint disable-line rule:line-length
+          egress-policy: ${{ inputs.harden_runner_egress == 'audit' && 'audit' || 'block' }}
+          allowed-endpoints: >
+            ${{ env.CONNECTION_ALLOW_LIST }}
+
+      - name: 'Checkout Gerrit change'
+        if: inputs.gerrit_refspec != ''
+        # yamllint disable-line rule:line-length
+        uses: lfreleng-actions/checkout-gerrit-change-action@35e98c8043ec411611e464e296bcfb441a5c5093  # v1.1.2
+        with:
+          gerrit-refspec: ${{ inputs.gerrit_refspec }}
+          gerrit-project: ${{ inputs.gerrit_project }}
+          # yamllint disable-line rule:line-length
+          gerrit-url: ${{ inputs.gerrit_url != '' && inputs.gerrit_url || vars.GERRIT_URL }}
+          delay: '0s'
+          repository: ${{ inputs.repository || github.repository }}
+          ref: refs/heads/${{ inputs.gerrit_branch }}
+      - name: 'Checkout repository'
+        if: inputs.gerrit_refspec == ''
+        # yamllint disable-line rule:line-length
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: ${{ inputs.repository || github.repository }}
+          ref: ${{ inputs.ref }}
+          persist-credentials: false
+
+      - name: 'Generate CBOM'
+        id: cbom
+        # yamllint disable-line rule:line-length
+        uses: lfreleng-actions/cbom-action@06a25686fe4ebcbb8c9f28d6948cdca7d65ed852  # v0.0.1
+        with:
+          path_prefix: ${{ inputs.path_prefix }}
+          output_directory: ${{ runner.temp }}/cbom
+          languages: ${{ inputs.cbom_languages }}
+          fail_on_error: 'false'
+
+      - name: 'Upload CBOM artefacts'
+        # yamllint disable-line rule:line-length
+        if: ${{ !cancelled() && steps.cbom.outcome == 'success' && steps.cbom.outputs.file_count != '0' }}
+        # yamllint disable-line rule:line-length
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
+        with:
+          name: cbom-files${{ inputs.artefact_suffix }}
+          path: ${{ steps.cbom.outputs.cbom_pattern }}
+          retention-days: 45
+          if-no-files-found: warn

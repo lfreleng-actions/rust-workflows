@@ -3,7 +3,7 @@
 # SPDX-FileCopyrightText: 2026 The Linux Foundation
 
 # =============================================================================
-# EXAMPLE: Plain GitHub-native caller for the reusable build-test workflow
+# EXAMPLE: Plain GitHub-native caller for the Rust verify lane
 # =============================================================================
 # Copy this file into your project's .github/workflows/ directory (for
 # example as build-test.yaml) and adjust the `uses:` ref and the optional
@@ -12,6 +12,10 @@
 # This is the GitHub-native form: it runs on pull requests, exactly like a
 # standard GitHub project. For projects where Gerrit is the source of truth,
 # use the gerrit.yaml example in this directory instead.
+#
+# Linting (cargo fmt, cargo clippy) is not part of this lane: declare them
+# as 'language: system' hooks in .pre-commit-config.yaml and let the
+# organisation's linting workflow run them.
 # =============================================================================
 name: 'Build/Test'
 
@@ -36,19 +40,60 @@ jobs:
     permissions:
       contents: read
       pull-requests: read  # repository-metadata-action queries PR data
-    # REPLACE the pinned SHA below with a workflows-template release SHA
-    # (or your instantiated workflows repository's release SHA).
+      issues: read  # grype-scan-action reads cve-bypass issues
+    # REPLACE the pinned SHA below with a rust-workflows release SHA.
     # The all-zero SHA is a non-functional placeholder, NOT a real commit.
     # yamllint disable-line rule:line-length
-    uses: lfreleng-actions/workflows-template/.github/workflows/build-test.yaml@0000000000000000000000000000000000000000  # REPLACE: vX.Y.Z
+    uses: lfreleng-actions/rust-workflows/.github/workflows/build-test.yaml@0000000000000000000000000000000000000000  # REPLACE: vX.Y.Z
     # All inputs are optional. Uncomment and tune only what your project
     # needs; everything else falls back to sensible defaults.
     # with:
-    #   path_prefix: '.'              # project root (monorepo subdir, etc.)
+    #   # Project selection
+    #   path_prefix: '.'              # directory holding the project
+    #   manifest_path: 'Cargo.toml'   # relative to path_prefix
+    #   workspace: true               # every member; packages replaces it
+    #   packages: ''                  # e.g. 'core cli'
+    #   exclude: ''                   # members to skip
+    #   features: ''                  # e.g. 'tls json'
+    #   all_features: false
+    #   no_default_features: false
+    #
+    #   # Toolchain and environment
+    #   toolchain: ''                 # empty: rust-toolchain.toml or stable
+    #   lockfile_required: false      # true fails without Cargo.lock
+    #   setup_script: ''              # e.g. 'scripts/install-deps.sh'
+    # yamllint disable-line rule:line-length
+    #   runners: '[{"runner": "ubuntu-latest", "arch": "x64"}, {"runner": "ubuntu-24.04-arm", "arch": "arm64"}]'
+    #   cache: false                  # true caches ~/.cargo and target/
+    #
+    #   # Build
+    #   profile: 'release'
+    #   binaries: false               # true uploads binaries + SHA256SUMS
+    #   build_timeout_minutes: 20
+    #
+    #   # Tests
+    #   tests_enabled: true
+    #   test_matrix: 'msrv'           # 'project', 'msrv' or 'full'
+    #   test_runner: 'cargo'          # or 'nextest'
+    #   coverage: false               # cargo-llvm-cov on the project leg
     #   test_permit_fail: false       # soft-fail tests
-    #   audit_enabled: true           # false skips the dependency audit
-    #   audit_permit_fail: false      # soft-fail dependency audit
-    #   sbom_enabled: true            # false skips SBOM generation
+    #   test_timeout_minutes: 20
+    #
+    #   # Audit (cargo-audit, optionally cargo-deny)
+    #   audit_enabled: true
+    #   audit_permit_fail: false      # soft-fail the audit
+    #   audit_ignore_vulns: ''        # e.g. 'RUSTSEC-2024-0001'
+    #   deny_enabled: false           # also run cargo-deny
+    #
+    #   # SBOM and Grype
+    #   sbom_enabled: true            # false also skips Grype
     #   grype_enabled: true           # false skips the Grype scan only
-    #   grype_fail_on: 'medium'       # Grype severity gate
+    #   grype_fail_on: 'medium'       # severity gate; 'none' never gates
+    #   grype_permit_fail: false      # true reports without failing
+    #   grype_gate_when: 'always'     # or 'dependencies-changed'
+    #   grype_only_fixed: false       # ignore unfixable advisories
+    #
+    #   # CBOM (advisory; scans Java, Python and Go sources only)
+    #   cbom_enabled: false
+    #
     #   harden_runner_egress: 'block' # 'block' (default) or 'audit'
