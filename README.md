@@ -3,175 +3,110 @@ SPDX-License-Identifier: Apache-2.0
 SPDX-FileCopyrightText: 2025 The Linux Foundation
 -->
 
-# 🔧 Workflows Template
+# 🦀 Rust Workflows
 
 <!-- prettier-ignore-start -->
 <!-- markdownlint-disable-next-line MD013 -->
-[![Linux Foundation](https://img.shields.io/badge/Linux-Foundation-blue)](https://linuxfoundation.org/) [![Source Code](https://img.shields.io/badge/GitHub-100000?logo=github&logoColor=white&color=blue)](https://github.com/lfreleng-actions/workflows-template) [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0) [![pre-commit.ci status badge]][pre-commit.ci results page] [![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/lfreleng-actions/workflows-template/badge)](https://scorecard.dev/viewer/?uri=github.com/lfreleng-actions/workflows-template)
+[![Linux Foundation](https://img.shields.io/badge/Linux-Foundation-blue)](https://linuxfoundation.org/) [![Source Code](https://img.shields.io/badge/GitHub-100000?logo=github&logoColor=white&color=blue)](https://github.com/lfreleng-actions/rust-workflows) [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0) [![pre-commit.ci status badge]][pre-commit.ci results page] [![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/lfreleng-actions/rust-workflows/badge)](https://scorecard.dev/viewer/?uri=github.com/lfreleng-actions/rust-workflows)
 <!-- prettier-ignore-end -->
 
-The generic, language-agnostic starting point for reusable-workflow
-repositories in this GitHub organisation (`go-workflows`,
-`node-workflows`, …). It carries the canonical Linux Foundation pipeline
-**skeletons and patterns** — not a real pipeline: language-specific
-steps are `# TEMPLATE:`-marked placeholders that instantiators
-replace with real actions. `python-workflows` is the language-specific
-reference implementation of these patterns.
+Reusable GitHub Actions workflows that build, test, audit, describe,
+scan, release and publish Rust projects, in the Linux Foundation's
+canonical pipeline shape. They compose the organisation's Rust actions
+the way `python-workflows` composes the Python ones, with matching
+input names wherever Rust has a counterpart.
 
-## Skeleton reusable workflows
+> **Status: under construction.** [`docs/BRIEF.md`](docs/BRIEF.md)
+> records the settled design. The three workflow files in
+> `.github/workflows/` are still the language-neutral skeletons this
+> repository started from; each lane replaces its skeleton as it lands.
+> Do not call them from a project yet.
+
+## Lanes
 
 <!-- markdownlint-disable MD013 -->
 
-| Workflow | Purpose | Trigger style |
-| -------- | ------- | ------------- |
-| `.github/workflows/build-test.yaml` | Build, test, audit, SBOM and Grype scan skeleton | Pull request |
-| `.github/workflows/build-test-release.yaml` | Release skeleton (Model A, tag-driven): tag validation, release artefact attachment and draft-release promotion | Tag push |
-| `.github/workflows/merge.yaml` | Merge/publish skeleton (Model B, merge-driven): snapshot publish on every merge plus `releases/` file-triggered release publish | Merge / push to main |
+| Workflow                                    | Purpose                                                       | Trigger         | Tracking |
+| ------------------------------------------- | ------------------------------------------------------------- | --------------- | -------- |
+| `.github/workflows/build-test.yaml`         | Verify: build, test, audit, SBOM and Grype scan               | Pull request    | #4       |
+| `.github/workflows/build-test-release.yaml` | Model A: tag-driven release, with opt-in crates.io publishing | Tag push        | #5       |
+| `.github/workflows/merge.yaml`              | Model B: merge-driven, release-file triggered publishing      | Merge to `main` | #6       |
 
 <!-- markdownlint-enable MD013 -->
 
-Each pipeline runs a `repository-metadata` job in parallel (an
-informational step that does not gate the build). After `build`, the
-test, audit and SBOM/Grype branches run in parallel - none gates
-another, so a pull request surfaces every failure at once (jobs in
-`{ }` run concurrently; `->` denotes sequence):
+[#8](https://github.com/lfreleng-actions/rust-workflows/issues/8)
+tracks the whole Rust toolkit, including enhancements in the action
+repositories.
+
+The verify lane runs, after a metadata job that resolves one exact
+toolchain for the whole run (jobs in `{ }` run concurrently; `->`
+denotes sequence):
 
 ```text
-build -> { tests | audit | sbom -> grype }
+rust-metadata -> build -> { tests | audit | sbom -> grype }
 ```
 
-The release skeleton wraps this with `tag-validate` up front and a
-release-promotion chain at the end. It also **defers `tests` until
-`audit` and `grype` have both passed**, so a failing audit skips the
-test suite and never reaches release promotion:
+## Building blocks
 
-```text
-tag-validate -> build -> { audit | sbom -> grype } -> tests
-  -> attach-artefacts -> promote-release
-```
+<!-- markdownlint-disable MD013 -->
 
-The merge skeleton implements the Jenkins-heritage LF/Gerrit model:
+| Stage    | Action                                                                                     |
+| -------- | ------------------------------------------------------------------------------------------ |
+| Metadata | [build-metadata-action](https://github.com/lfreleng-actions/build-metadata-action)         |
+| Build    | [rust-build-action](https://github.com/lfreleng-actions/rust-build-action)                 |
+| Test     | [rust-test-action](https://github.com/lfreleng-actions/rust-test-action)                   |
+| Audit    | [rust-audit-action](https://github.com/lfreleng-actions/rust-audit-action)                 |
+| SBOM     | [sbom-action](https://github.com/lfreleng-actions/sbom-action)                             |
+| Scan     | [grype-scan-action](https://github.com/lfreleng-actions/grype-scan-action)                 |
+| Publish  | [rust-crate-publish-action](https://github.com/lfreleng-actions/rust-crate-publish-action) |
 
-```text
-{ resolve-version | build } -> snapshot-publish
-check-release -> release-publish (when a release file merged)
-```
+<!-- markdownlint-enable MD013 -->
 
-## Dual release models
+Linting runs through the organisation's separate linting workflow and
+[standalone-linting-action](https://github.com/lfreleng-actions/standalone-linting-action),
+which prepares the project's Rust toolchain for `cargo fmt` and
+`cargo clippy` hooks. The lanes here do not lint.
+[test-rust-project](https://github.com/lfreleng-actions/test-rust-project)
+and its `variants/` provide the fixtures the self-test runs against.
 
-Repositories built from this template support **both** release models
-so consumers can adopt either — or migrate between them — without
-divergent behaviour:
+## Release models
 
-- **Model A — tag-driven** (`build-test-release.yaml`): the version
-  comes from a validated, signed semver tag; a GitHub release carries
-  the attested artefacts. Canonical for GitHub-native projects and
-  Gerrit projects whose tags replicate to the mirror.
-- **Model B — merge-driven** (`merge.yaml`): every merge publishes a
-  snapshot (version from committed metadata such as
-  `version.properties` → `X.Y.Z-SNAPSHOT`); a release triggers from a
-  committed release file (`releases/*.yaml`) in the merged change.
-  Canonical for Jenkins-heritage LF/Gerrit projects publishing to
-  Nexus.
+The workflows support both release models, so a project can adopt
+either:
 
-## Usage
-
-Copy a template from [`examples/`](examples/) into your project's
-`.github/workflows/` directory and replace the placeholder `uses:` SHA
-with a pinned release. Each workflow ships in two forms:
-
-- `github.yaml` — a plain GitHub-native caller (pull-request, tag-push
-  or push-to-main triggered).
-- `gerrit.yaml` — a Gerrit-wrapped caller for projects where Gerrit is
-  the source of truth (SCM), integrating with `gerrit_to_platform`
-  voting/commenting.
-
-```text
-examples/
-  build-test/          { github.yaml, gerrit.yaml }
-  build-test-release/  { github.yaml, gerrit.yaml }
-  merge/               { github.yaml, gerrit.yaml }
-```
-
-All inputs are optional and default to the canonical behaviour; see the
-`inputs:` block at the top of each workflow file for the full,
-documented list.
-
-## GitHub CLI telemetry
-
-The release skeleton shells out to `gh`, which posts usage events to
-`cafe.github.com` unless told otherwise. The reusable workflow and the
-`build-test-release` caller examples both set:
-
-```yaml
-env:
-  GH_TELEMETRY: 'false'
-```
-
-Three reasons this matters here:
-
-- No step needs that endpoint. The GitHub CLI sends telemetry from a
-  separate hidden `gh send-telemetry` subcommand on a two-second
-  timeout, so disabling it leaves every `gh` command working as normal.
-- The organisation runs harden-runner under `egress-policy: block`, so
-  an unnecessary call shows up as a blocked connection. That noise
-  competes with genuine findings in the run insights.
-- Adding `cafe.github.com` to the shared allow-list instead would widen
-  egress across every repository in the organisation to carry
-  analytics. Disabling the call at source keeps that policy tight.
-
-`GH_TELEMETRY` takes precedence over `DO_NOT_TRACK`, so this one
-variable covers both. A workflow-level `env:` block does not cross the
-`workflow_call` boundary, which is why the reusable workflow and the
-caller examples each set it.
-
-Any caller-side job stacked after the release job — a registry publish
-step, for instance — inherits the value from the caller workflow.
-
-## How to instantiate this template
-
-When creating a new `<lang>-workflows` repository from this template:
-
-1. Replace every `# TEMPLATE:` placeholder step in the three skeleton
-   workflows with the real language build/test/audit/SBOM/publish
-   actions, keeping the step ids and job outputs intact. The
-   surrounding job graph, harden-runner wiring, dual checkout, Gerrit
-   validation and Grype scan are generic — keep them as-is.
-2. Wire real fixture/consumer repositories into
-   [`testing.yaml`](.github/workflows/testing.yaml) so the workflows
-   run end-to-end against real projects on every pull request.
-3. Update this README and all badge/link slugs (`workflows-template` →
-   your repository name).
-4. When new work talks to new/external endpoints, follow the central
-   allow-list process: raise a PR against `lfreleng-actions/.github`
-   adding the hosts/ports to the org harden-runner allow-list, get it
-   released, then pin the new tag's commit SHA in the
-   `harden_runner_allowlist` defaults. Reserve `harden_runner_egress:
-   'audit'` for bring-up/endpoint discovery.
-5. Keep support for **both** release models (Model A and Model B),
-   factoring version resolution so the two share building blocks.
-6. Update the `examples/` callers to reference your repository and its
-   real input surface.
+- **Model A, tag-driven** (`build-test-release.yaml`): the version
+  comes from a validated, signed SemVer tag; a GitHub release carries
+  the attested artefacts, and crates.io publishing is opt-in through
+  Trusted Publishing.
+- **Model B, merge-driven** (`merge.yaml`): every merge builds and
+  dry-runs the publish, keeping the result as a workflow artefact,
+  since crates.io has no snapshots; a release file under `releases/`
+  in the merged change triggers the real publish and the tag.
 
 ## Gerrit support
 
-The reusable workflows are Gerrit-aware: when a caller sets the
-`gerrit_refspec` input they check out the change with
-`checkout-gerrit-change-action` instead of `actions/checkout`. Vote and
-comment casting live in the `gerrit.yaml` caller examples (clear vote →
-run → report vote for verify; comments without votes for merge), never
-inside the reusable workflows.
+The workflows are Gerrit-aware: when a caller sets `gerrit_refspec`
+they check out the change with `checkout-gerrit-change-action` instead
+of `actions/checkout`. Voting and comments live in the `gerrit.yaml`
+caller examples, never inside the reusable workflows.
+
+## GitHub CLI telemetry
+
+The release workflow shells out to `gh`, which posts usage events to
+`cafe.github.com` unless told otherwise. The workflow and its caller
+examples set `GH_TELEMETRY: 'false'`: no step needs that endpoint, a
+blocked call adds noise under harden-runner's `block` policy, and
+allowing it would widen egress across the organisation. A
+workflow-level `env:` block does not cross the `workflow_call`
+boundary, so both sides set it.
 
 ## Testing
 
 [`.github/workflows/testing.yaml`](.github/workflows/testing.yaml)
-exercises the build-test skeleton against fixture repositories of
-different languages, calling it by self-repository path
+calls the workflows by self-repository path
 (`uses: $/.github/workflows/build-test.yaml`), which resolves this
-repository at the commit already running. The placeholder
-steps are language-agnostic, so the self-test validates the generic
-scaffolding regardless of project language — which is the point of this
-repository.
+repository at the commit already running. Until the verify lane lands,
+it exercises the skeleton.
 
-[pre-commit.ci results page]: https://results.pre-commit.ci/latest/github/lfreleng-actions/workflows-template/main
-[pre-commit.ci status badge]: https://results.pre-commit.ci/badge/github/lfreleng-actions/workflows-template/main.svg
+[pre-commit.ci results page]: https://results.pre-commit.ci/latest/github/lfreleng-actions/rust-workflows/main
+[pre-commit.ci status badge]: https://results.pre-commit.ci/badge/github/lfreleng-actions/rust-workflows/main.svg
