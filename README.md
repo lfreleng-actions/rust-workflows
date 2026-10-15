@@ -124,6 +124,8 @@ workflow. The defaults gate; the inputs below relax them.
 | `grype_fail_on`                               | all            | `medium` | Lowest severity that fails the scan; `none` reports without gating                                                                              |
 | `grype_permit_fail`                           | all            | `false`  | Report Grype findings without failing the job                                                                                                   |
 | `grype_only_fixed`                            | all            | `false`  | Ignore advisories that have no fix                                                                                                              |
+| `grype_dependency_policy`                     | all            | `all`    | `declared` gates the crates the project declares and reports inherited ones as warnings                                                         |
+| `grype_transitive_fail_on`                    | all            | `none`   | Under `declared`, the lowest severity at which an inherited crate still gates                                                                   |
 | `grype_gate_when`                             | verify         | `always` | `dependencies-changed` gates when the change touches `Cargo.toml`, `Cargo.lock` or `.cargo/config*`, and otherwise reports findings as warnings |
 | `grype_cache_db`                              | verify         | `true`   | Grype database cache: `true`, `false`, or restore without saving                                                                                |
 | `cbom_enabled`                                | verify         | `false`  | Advisory CBOM job; see [CBOM](#cbom)                                                                                                            |
@@ -141,13 +143,25 @@ and merge lanes the variable relaxes the Grype scan alone. Callers
 grant `issues: read`, which Grype needs to read approved `cve-bypass`
 issues.
 
-The Grype gate is moving towards dependency-aware gating in
-`grype-scan-action`: thresholds for inherited dependencies and gating
-that tracks what a change declared. The lanes will expose those inputs
-once a release carries them. Until then, `grype_gate_when`,
-`grype_fail_on`, `grype_only_fixed` and `grype_permit_fail` cover the
-common cases, and maintainers can approve a bypass for a single CVE
-through a `cve-bypass` issue, which the action honours.
+The Grype gate can tell the crates a project declares from those it
+inherits, reading the Cargo graph in the SBOM. Every finding gates by
+default. To gate on declared crates and report inherited ones as
+warnings, opt in:
+
+```yaml
+    with:
+      grype_dependency_policy: 'declared'
+      # Optional: still gate an inherited crate at this severity
+      grype_transitive_fail_on: 'high'
+```
+
+The action reads the graph from the JSON SBOM, so with
+`sbom_format: xml` every finding counts as declared and gates.
+
+With `grype_gate_when`, `grype_fail_on`, `grype_only_fixed` and
+`grype_permit_fail` these cover the common cases, and maintainers can
+approve a bypass for a single CVE through a `cve-bypass` issue, which
+the action honours.
 
 ## Publishing to crates.io
 

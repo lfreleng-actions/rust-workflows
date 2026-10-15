@@ -482,6 +482,7 @@ match the Python family where the meaning matches.
 | `deny_enabled`, `deny_checks`                                     | audit (`cargo deny`)  | `false`, `advisories bans licenses sources`                          |
 | `sbom_enabled`, `sbom_include_dev`, `sbom_format`                 | sbom                  | `true`, `false` (build-dependencies; Q13), `both`                    |
 | `grype_enabled`, `grype_fail_on`, `grype_permit_fail`             | grype                 | `true`, `medium`, `false` (falls back to `vars.NO_BLOCK_AUDIT_FAIL`) |
+| `grype_dependency_policy`, `grype_transitive_fail_on`             | grype                 | `all`, `none` (Q13)                                                  |
 | `harden_runner_egress`, `harden_runner_allowlist`                 | harden-runner         | `block`, pinned organisation list                                    |
 | `gerrit_refspec`, `gerrit_project`, `gerrit_branch`, `gerrit_url` | Gerrit-aware checkout | `''`                                                                 |
 | `runners`                                                         | build, tests          | `[{"runner":"ubuntu-latest","arch":"x64"}]` (D4)                     |
@@ -576,22 +577,28 @@ skips fork pull requests and the SBOM would go missing on each one.
 That guard buys nothing here: the `build` job has already compiled
 this same checkout with the same token, scoped to `contents: read`.
 
-Grype gating by provenance (grype-scan-action #25) trusts a dependency
-graph from a measured generator and from no other. The
-measurements in #31 show that `cargo-cyclonedx` alone misclassifies a
-sibling workspace member's dependencies as inherited. The planned rule
-counts a component as part of the project unless its `bom-ref` names a
-registry or Git source, so an unknown shape gates rather than passes.
+Grype gating by provenance (grype-scan-action v0.4.0, #25 and #31)
+trusts a dependency graph from a measured generator and from no other.
+For `cargo-cyclonedx` output at CycloneDX 1.4 to 1.6 it counts a
+component as part of the project unless its `bom-ref` names a registry
+or Git source, so a sibling workspace member stays declared and an
+unknown shape gates rather than passes.
 
-The lanes expose the Grype controls v0.2.0 releases (the severity
-threshold, fixed-advisory filtering, `gate-when`, `cache-db` and
-`permit-fail`) and not the
-inputs #25 plans (`dependency-policy`, `transitive-fail-on`): passing
-an input a release lacks would draw a warning and nothing more, and the
-lane would
-advertise a control that does nothing. Each lands as a lane input once
-a grype-scan-action release carries it. A release or merge scan always
-gates, whatever changed.
+The lanes expose the severity threshold, fixed-advisory filtering,
+`permit-fail` and, on the verify lane, `gate-when` and `cache-db`.
+They also expose the provenance controls as `grype_dependency_policy`
+and `grype_transitive_fail_on`, at the action's defaults, `all` and
+`none`: every finding gates, as before, until a project opts in. A
+project that sets `grype_dependency_policy: declared` gates on the
+crates it declares and reports inherited ones as warnings, and
+`grype_transitive_fail_on: high` (for one) still gates an inherited
+crate at that severity. No sibling family exposes these inputs yet, so
+the names follow the lanes' `grype_` convention. `declared-source` and
+`declared-dependencies` stay at the action's defaults: the Cargo graph
+carries its own provenance. The action reads that graph from the JSON
+SBOM, so with `sbom_format: xml` every finding counts as declared and
+gates. A release or merge scan always gates,
+whatever changed, under the policy the caller chose.
 
 CBOM: `cbom-action` covers Java, Python and Go (C# in preview), and
 CBOMkit and sonar-cryptography do not analyse Rust (cbom-action #10).
@@ -671,12 +678,10 @@ proposal.
 | ---------------------- | -------------------------------------------------------------------------------- | --------------------------------------------------------------- |
 | `rust-workflows`       | Lanes #4, #6 (epic #8)                                                           | Implemented; first release pending                              |
 | `rust-workflows`       | Release lane #5                                                                  | Implemented; open until `test-rust-project` releases through it |
-| `rust-workflows`       | Expose `dependency-policy` and `transitive-fail-on` for Grype                    | After a grype-scan-action release carries #25                   |
 | `rust-workflows`       | Check `releases/` files at verify time (docker parity #36)                       | Open                                                            |
 | `test-rust-project`    | Release through this repository's release lane (#5)                              | After the first release of this repository                      |
 | `test-rust-project`    | A fixture commit that adds a `releases/` file, for the merge lane's release path | Open                                                            |
 | `test-rust-project`    | One tag-push workflow (#15)                                                      | In review                                                       |
-| `grype-scan-action`    | Classify Cargo dependency graphs (#31)                                           | Measured and planned; lands after #25                           |
 | `cbom-action`          | CBOM coverage for Rust (#10)                                                     | No upstream support; waiting on CBOMkit                         |
 | `nexus-publish-action` | Nexus Cargo repositories for snapshots (#185)                                    | Not available on LF Nexus; snapshots stay artefacts (Q8)        |
 

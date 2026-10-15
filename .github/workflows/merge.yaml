@@ -274,6 +274,22 @@ on:
         required: false
         type: string
         default: 'medium'
+      grype_dependency_policy:
+        description: >-
+          Which Grype findings gate: 'all' gates every finding; 'declared'
+          gates the crates the project declares and reports inherited
+          ones as warnings, subject to grype_transitive_fail_on
+        required: false
+        type: string
+        default: 'all'
+      grype_transitive_fail_on:
+        description: >-
+          Under grype_dependency_policy 'declared', the lowest severity
+          at which an inherited crate gates: negligible, low, medium,
+          high or critical; 'none' never gates on one
+        required: false
+        type: string
+        default: 'none'
       grype_permit_fail:
         description: >-
           Report Grype findings without failing the job. When false,
@@ -443,6 +459,8 @@ jobs:
           ARTEFACT_SUFFIX: ${{ inputs.artefact_suffix }}
           SBOM_FORMAT: ${{ inputs.sbom_format }}
           GRYPE_FAIL_ON: ${{ inputs.grype_fail_on }}
+          GRYPE_DEPENDENCY_POLICY: ${{ inputs.grype_dependency_policy }}
+          GRYPE_TRANSITIVE_FAIL_ON: ${{ inputs.grype_transitive_fail_on }}
           PUBLISH_ENABLED: ${{ inputs.publish_enabled }}
           PUBLISH_ENVIRONMENT: ${{ inputs.publish_environment }}
         run: |
@@ -459,6 +477,10 @@ jobs:
           check test_runner "$TEST_RUNNER" 'cargo nextest'
           check sbom_format "$SBOM_FORMAT" 'json xml both'
           check grype_fail_on "$GRYPE_FAIL_ON" \
+            'negligible low medium high critical none'
+          check grype_dependency_policy "$GRYPE_DEPENDENCY_POLICY" \
+            'all declared'
+          check grype_transitive_fail_on "$GRYPE_TRANSITIVE_FAIL_ON" \
             'negligible low medium high critical none'
           if [ "$PUBLISH_ENABLED" = 'true' ] \
             && [ -z "$PUBLISH_ENVIRONMENT" ]; then
@@ -1124,7 +1146,12 @@ jobs:
           # yamllint disable-line rule:line-length
           sbom: ${{ inputs.sbom_format == 'xml' && 'sbom-cyclonedx.xml' || 'sbom-cyclonedx.json' }}
           fail-on: ${{ inputs.grype_fail_on }}
+          dependency-policy: ${{ inputs.grype_dependency_policy }}
+          transitive-fail-on: ${{ inputs.grype_transitive_fail_on }}
           only-fixed: ${{ inputs.grype_only_fixed }}
+          # Restore the database but never save one from a merge run:
+          # release and merge lanes write no cache (BRIEF D1).
+          cache-db: 'restore-only'
           # yamllint disable-line rule:line-length
           permit-fail: ${{ inputs.grype_permit_fail || vars.NO_BLOCK_AUDIT_FAIL == 'true' }}
           github-token: ${{ secrets.GITHUB_TOKEN }}
