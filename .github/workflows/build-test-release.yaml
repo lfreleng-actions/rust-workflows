@@ -252,6 +252,14 @@ on:
         required: false
         type: string
         default: 'both'
+      sbom_include_dev:
+        description: >-
+          Include Cargo build-dependencies in the SBOM. Dev-dependencies
+          never ship with a crate, so the SBOM leaves them out either
+          way.
+        required: false
+        type: boolean
+        default: false
       grype_enabled:
         description: 'Run the Grype vulnerability scan over the SBOM'
         required: false
@@ -930,17 +938,67 @@ jobs:
           name: ${{ needs.rust-metadata.outputs.lockfile_artefact }}
           path: ${{ needs.rust-metadata.outputs.lockfile_dir }}
 
-      # Syft reads Cargo.lock, which lives at the workspace root, so the
-      # SBOM describes the root rather than path_prefix.
+      # sbom-action pins no toolchain: it runs cargo in the project,
+      # where a toolchain file would choose one. Install the run's
+      # resolved toolchain from outside the checkout, with the scrub
+      # the other jobs apply (docs/BRIEF.md Q4), and name it to the
+      # SBOM step alone through RUSTUP_TOOLCHAIN.
+      - name: 'Install the toolchain'
+        shell: bash
+        env:
+          TOOLCHAIN: ${{ needs.rust-metadata.outputs.toolchain }}
+        run: |
+          # Install the toolchain
+          set -euo pipefail
+          cd "$RUNNER_TEMP"
+          scrub=(env -u CARGO_REGISTRY_TOKEN
+            -u ACTIONS_ID_TOKEN_REQUEST_TOKEN
+            -u ACTIONS_ID_TOKEN_REQUEST_URL -u ACTIONS_RUNTIME_TOKEN
+            -u GITHUB_OUTPUT -u GITHUB_ENV -u GITHUB_PATH
+            -u GITHUB_STATE -u GITHUB_STEP_SUMMARY)
+          while IFS= read -r name; do
+            scrub+=(-u "$name")
+          done < <(compgen -e | grep -E '^CARGO_REGISTRIES_.+_TOKEN$' \
+            || true)
+          "${scrub[@]}" rustup toolchain install "$TOOLCHAIN" \
+            --profile minimal --no-self-update
+          "${scrub[@]}" RUSTUP_TOOLCHAIN="$TOOLCHAIN" cargo --version
+
+      # The Cargo backend describes the graph cargo resolves for
+      # path_prefix: a member's own dependencies, or every member's
+      # merged at a workspace root. CycloneDX 1.5, the action's default,
+      # is the newest cargo-cyclonedx writes and within the 1.4-1.6
+      # range in which grype-scan-action trusts a Cargo graph's scopes.
+      #
+      # untrusted_checkout is 'false' deliberately. The backend runs
+      # cargo, and cargo treats a checkout as code: .cargo/config.toml
+      # can name a rustc wrapper that cargo metadata executes. Its
+      # 'auto' mode classifies fork pull requests as untrusted and
+      # skips, losing the SBOM. That guard buys nothing here: the build
+      # job has already compiled this same checkout with the same
+      # read-only token.
       - name: 'Generate SBOM'
         id: sbom
         # yamllint disable-line rule:line-length
         uses: lfreleng-actions/sbom-action@cd6b02f4d099fc19153b505c9faa7bd01ccfa0e5  # v0.4.0
+        env:
+          RUSTUP_TOOLCHAIN: ${{ needs.rust-metadata.outputs.toolchain }}
         with:
-          backend: 'syft'
-          path_prefix: ${{ needs.rust-metadata.outputs.lockfile_dir }}
+          backend: 'cyclonedx'
+          # Named rather than left to 'auto', so the lane states the
+          # build tool instead of inferring it.
+          dependency_manager: 'cargo'
+          # The whole workspace when the lane acts on more than one
+          # member (workspace, or named packages), so the SBOM covers
+          # everything the build does; the selected manifest's own
+          # directory for a single package. Either directory holds the
+          # Cargo.toml the action needs.
+          # yamllint disable-line rule:line-length
+          path_prefix: ${{ (inputs.workspace || inputs.packages != '') && needs.rust-metadata.outputs.lockfile_dir || needs.rust-metadata.outputs.manifest_dir }}
           sbom_format: ${{ inputs.sbom_format }}
+          include_dev: ${{ inputs.sbom_include_dev }}
           output_directory: ${{ runner.temp }}/sbom
+          untrusted_checkout: 'false'
 
       - name: 'Upload SBOM artefacts'
         # yamllint disable-line rule:line-length

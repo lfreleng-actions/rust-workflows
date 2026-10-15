@@ -155,6 +155,9 @@ on:
       lockfile_generated:
         description: "'true' when this job resolved and uploaded Cargo.lock"
         value: ${{ jobs.rust-metadata.outputs.lockfile_generated }}
+      manifest_dir:
+        description: 'Directory of the selected Cargo.toml, workspace-relative'
+        value: ${{ jobs.rust-metadata.outputs.manifest_dir }}
       lockfile_dir:
         description: 'Directory of Cargo.lock, relative to the workspace'
         value: ${{ jobs.rust-metadata.outputs.lockfile_dir }}
@@ -184,6 +187,7 @@ jobs:
       publishable_packages: ${{ steps.packages.outputs.publishable_packages }}
       publishable_count: ${{ steps.packages.outputs.publishable_count }}
       lockfile_generated: ${{ steps.lockfile.outputs.generated }}
+      manifest_dir: ${{ steps.project.outputs.dir }}
       lockfile_dir: ${{ steps.lockfile.outputs.dir }}
       lockfile_artefact: ${{ steps.lockfile.outputs.artefact }}
     steps:

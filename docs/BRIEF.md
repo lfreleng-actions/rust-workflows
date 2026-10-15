@@ -283,9 +283,10 @@ rust-metadata -> build -> { tests | audit | sbom -> grype | cbom }
 - When the project commits no `Cargo.lock`, `rust-metadata` resolves
   one with `cargo generate-lockfile` and uploads it, and `build`,
   `tests`, `audit` and `sbom` restore it into their checkouts. Every
-  job then reads the dependency graph the build used. Syft reads
-  `Cargo.lock` and runs no cargo, so without the handoff the SBOM, and
-  the Grype scan of it, would miss every Rust dependency. Resolving a
+  job then reads the dependency graph the build used. Without the
+  handoff, `sbom-action` would resolve a lockfile of its own, and the
+  SBOM, with the Grype scan of it, could describe a graph the build
+  never compiled. Resolving a
   lockfile reads the registry index and runs no crate code; Cargo picks
   a lockfile format the declared `rust-version` can read, so the MSRV
   leg reads it too.
@@ -479,7 +480,7 @@ match the Python family where the meaning matches.
 | `audit_enabled`, `audit_permit_fail`                              | audit                 | `true`, `false`                                                      |
 | `audit_ignore_vulns`, `audit_allow_list_path`                     | audit                 | `''`                                                                 |
 | `deny_enabled`, `deny_checks`                                     | audit (`cargo deny`)  | `false`, `advisories bans licenses sources`                          |
-| `sbom_enabled`, `sbom_include_dev`, `sbom_format`                 | sbom                  | `true`, `false` (no effect with the `syft` backend; Q13), `both`     |
+| `sbom_enabled`, `sbom_include_dev`, `sbom_format`                 | sbom                  | `true`, `false` (build-dependencies; Q13), `both`                    |
 | `grype_enabled`, `grype_fail_on`, `grype_permit_fail`             | grype                 | `true`, `medium`, `false` (falls back to `vars.NO_BLOCK_AUDIT_FAIL`) |
 | `harden_runner_egress`, `harden_runner_allowlist`                 | harden-runner         | `block`, pinned organisation list                                    |
 | `gerrit_refspec`, `gerrit_project`, `gerrit_branch`, `gerrit_url` | Gerrit-aware checkout | `''`                                                                 |
@@ -512,11 +513,9 @@ failing test or audit because of a repository-wide switch.
 
 The release and merge workflows take the same inputs, except that
 `lockfile_required` defaults to `true` (D5), `cache` does not exist
-(D1), and `grype_gate_when`, `grype_cache_db`, `sbom_include_dev` and
-the CBOM inputs belong to the verify lane alone: a release scan always
-gates and never writes the database cache, and `sbom_include_dev`
-changes nothing until the lanes move to the `cargo` SBOM backend
-(Q13), when all three lanes gain it. Both add `semver_checks` (`false`),
+(D1), and `grype_gate_when`, `grype_cache_db` and the CBOM inputs
+belong to the verify lane alone: a release scan always gates and never
+writes the database cache. Both add `semver_checks` (`false`),
 `publish_enabled` (`false`), `publish_environment` (`production`) and
 `dry_run` (`false`). The release workflow also adds `attestations`
 (`true`), `sigstore_sign` (`true`, D3), `tag` (for a dry run) and the
@@ -550,19 +549,32 @@ downloads the allow-list also covers.
 
 ### Q13: SBOM and Grype
 
-**Decision for the first release:** the `sbom` job uses
-`sbom-action`'s `syft` backend, which reads `Cargo.lock`, and `grype`
-scans its JSON output.
+**Decision:** the `sbom` job uses `sbom-action`'s `cyclonedx` backend
+with the `cargo` dependency manager (v0.4.0), and `grype` scans its
+JSON output. The backend drives `cargo-cyclonedx`, which describes the
+graph Cargo resolves for a directory, anchored on the crate: a
+member's own graph, or one merged document for a workspace root. When
+the lane acts on more than one member (`workspace: true`, or named
+`packages`), the job scans the workspace root that `rust-metadata`
+resolved, so the SBOM covers everything the build does; for a single
+package it scans that manifest's directory. It
+never lists dev-dependencies (the tool has no option for them);
+`sbom_include_dev: true` keeps build-dependencies, marked
+`scope: excluded`. The job keeps CycloneDX 1.5, the action's default
+and the newest `cargo-cyclonedx` writes. The `syft` backend it replaces
+read `Cargo.lock`, listing every locked crate, including those that
+serve tests, build scripts or other platforms alone, with no scope.
 
-Syft's lockfile reading lists every locked crate, including those that
-serve tests, build scripts or other platforms alone, and records no
-dependency scope. sbom-action #53 adds a `cargo` dependency manager to
-its `cyclonedx` backend, driving `cargo-cyclonedx`, which describes the
-graph Cargo resolves, anchored on the crate, with one merged document
-for a workspace root. It never lists dev-dependencies (the tool has no
-option for them); `include_dev: true` keeps build-dependencies, marked
-`scope: excluded`. Once a release carries it, the workflows switch
-their SBOM to that backend.
+The action pins no toolchain, so the job installs the run's resolved
+toolchain from outside the checkout, with the scrub of Q4, and names
+it to the SBOM step through `RUSTUP_TOOLCHAIN`.
+
+The job sets `untrusted_checkout: 'false'`, as the Java lanes do.
+Cargo treats a checkout as code: `.cargo/config.toml` can name a rustc
+wrapper that `cargo metadata` executes, so the action's `auto` mode
+skips fork pull requests and the SBOM would go missing on each one.
+That guard buys nothing here: the `build` job has already compiled
+this same checkout with the same token, scoped to `contents: read`.
 
 Grype gating by provenance (grype-scan-action #25) trusts a dependency
 graph from a measured generator and from no other. The
@@ -659,14 +671,12 @@ proposal.
 | ---------------------- | -------------------------------------------------------------------------------- | --------------------------------------------------------------- |
 | `rust-workflows`       | Lanes #4, #6 (epic #8)                                                           | Implemented; first release pending                              |
 | `rust-workflows`       | Release lane #5                                                                  | Implemented; open until `test-rust-project` releases through it |
-| `rust-workflows`       | Switch the SBOM to the `cargo` backend                                           | After an sbom-action release carries #53                        |
 | `rust-workflows`       | Expose `dependency-policy` and `transitive-fail-on` for Grype                    | After a grype-scan-action release carries #25                   |
 | `rust-workflows`       | Check `releases/` files at verify time (docker parity #36)                       | Open                                                            |
 | `test-rust-project`    | Release through this repository's release lane (#5)                              | After the first release of this repository                      |
 | `test-rust-project`    | A fixture commit that adds a `releases/` file, for the merge lane's release path | Open                                                            |
 | `test-rust-project`    | One tag-push workflow (#15)                                                      | In review                                                       |
-| `sbom-action`          | `cargo` dependency manager for the `cyclonedx` backend (#51)                     | In review (#53)                                                 |
-| `grype-scan-action`    | Classify Cargo dependency graphs (#31)                                           | Measured and planned; lands after #25 and sbom-action #53       |
+| `grype-scan-action`    | Classify Cargo dependency graphs (#31)                                           | Measured and planned; lands after #25                           |
 | `cbom-action`          | CBOM coverage for Rust (#10)                                                     | No upstream support; waiting on CBOMkit                         |
 | `nexus-publish-action` | Nexus Cargo repositories for snapshots (#185)                                    | Not available on LF Nexus; snapshots stay artefacts (Q8)        |
 
