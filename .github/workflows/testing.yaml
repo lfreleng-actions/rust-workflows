@@ -336,6 +336,33 @@ jobs:
       dry_run: true
       artefact_suffix: '-merge'
 
+  # The merge lane's release path, on the fixture's merge commit that
+  # adds releases/workspace-0.1.0.yaml. That version is the workspace
+  # variant's, whose publishable members carry names crates.io refuses,
+  # so the dry run always finds them absent. Skipped where the other dry
+  # runs are, for the same reason.
+  merge-release-dry-run:
+    name: 'Merge release (dry run)'
+    # yamllint disable rule:line-length
+    if: >-
+      (github.event_name == 'pull_request'
+        && github.event.pull_request.head.repo.full_name != github.repository)
+      || (github.event_name == 'workflow_dispatch'
+        && github.ref == format('refs/heads/{0}', github.event.repository.default_branch))
+    # yamllint enable rule:line-length
+    permissions:
+      contents: write  # Declared by the (skipped) tag job
+      id-token: write  # Declared by the (skipped) publish job
+      pull-requests: read  # repository-metadata-action queries PR data
+      issues: read  # grype-scan-action reads cve-bypass issues
+    uses: $/.github/workflows/merge.yaml
+    with:
+      repository: 'lfreleng-actions/test-rust-project'
+      ref: 'bce2cc4d755482611d38a2f8f90661a89efcf4f6'
+      path_prefix: 'variants/workspace'
+      dry_run: true
+      artefact_suffix: '-merge-release'
+
   # Checks what the lanes left behind, beyond their own success.
   artefacts:
     name: 'Check Artefacts'
@@ -343,12 +370,14 @@ jobs:
       - verify
       - release-dry-run
       - merge-dry-run
+      - merge-release-dry-run
     # The dry runs may skip (see above); a failure still stops this.
     # yamllint disable rule:line-length
     if: >-
       ${{ !cancelled() && needs.verify.result == 'success'
       && contains(fromJSON('["success", "skipped"]'), needs.release-dry-run.result)
-      && contains(fromJSON('["success", "skipped"]'), needs.merge-dry-run.result) }}
+      && contains(fromJSON('["success", "skipped"]'), needs.merge-dry-run.result)
+      && contains(fromJSON('["success", "skipped"]'), needs.merge-release-dry-run.result) }}
     # yamllint enable rule:line-length
     runs-on: ubuntu-latest
     permissions: {}
@@ -372,6 +401,15 @@ jobs:
           DIR: ${{ runner.temp }}/artefacts
           RELEASE_RAN: ${{ needs.release-dry-run.result == 'success' }}
           MERGE_RAN: ${{ needs.merge-dry-run.result == 'success' }}
+          MERGE_HAS_RELEASE: ${{ needs.merge-dry-run.outputs.has_release }}
+          # yamllint disable-line rule:line-length
+          RELEASE_PATH_RAN: ${{ needs.merge-release-dry-run.result == 'success' }}
+          # yamllint disable-line rule:line-length
+          RELEASE_PATH_HAS_RELEASE: ${{ needs.merge-release-dry-run.outputs.has_release }}
+          # yamllint disable-line rule:line-length
+          RELEASE_PATH_VERSION: ${{ needs.merge-release-dry-run.outputs.version }}
+          # yamllint disable-line rule:line-length
+          RELEASE_PATH_CRATES: ${{ needs.merge-release-dry-run.outputs.crate_name }}
         run: |
           # Check the artefacts
           set -euo pipefail
@@ -445,5 +483,36 @@ jobs:
             pass 'The merge run packaged its snapshot crate'
           else
             miss 'The merge run packaged no snapshot crate'
+          fi
+          if [ "$MERGE_RAN" != 'true' ]; then
+            :
+          elif [ "$MERGE_HAS_RELEASE" = 'false' ]; then
+            pass 'The merge run found no release file'
+          else
+            miss "The merge run reported has_release: '$MERGE_HAS_RELEASE'"
+          fi
+          if [ "$RELEASE_PATH_RAN" != 'true' ]; then
+            echo "::notice::The merge release dry run skipped on this event"
+          else
+            if [ "$RELEASE_PATH_HAS_RELEASE" = 'true' ] \
+              && [ "$RELEASE_PATH_VERSION" = '0.1.0' ]; then
+              pass 'The merge release run found release 0.1.0'
+            else
+              got="'$RELEASE_PATH_HAS_RELEASE', '$RELEASE_PATH_VERSION'"
+              miss "The merge release run reported has_release, version: $got"
+            fi
+            # crate-verify reports the crates it verified; the
+            # publish = false member must not be among them.
+            long='name-too-long-for-crates-io-by-design'
+            want="$(printf '%s\n' \
+              "lfreleng-fixture-workspace-cli-$long" \
+              "lfreleng-fixture-workspace-core-$long" | LC_ALL=C sort)"
+            read -ra crates <<< "$RELEASE_PATH_CRATES"
+            got="$(printf '%s\n' ${crates[@]+"${crates[@]}"} | LC_ALL=C sort)"
+            if [ "$got" = "$want" ]; then
+              pass 'The merge release run verified both publishable crates'
+            else
+              miss "The merge release run verified: '$RELEASE_PATH_CRATES'"
+            fi
           fi
           exit "$failed"

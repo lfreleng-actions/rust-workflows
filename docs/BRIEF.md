@@ -633,19 +633,25 @@ changes once upstream support exists.
     scan;
   - the release lane with `dry_run: true` on the signed tag `v0.1.1`;
   - the merge lane with `dry_run: true`, on a commit that adds no
-    release file. Both dry runs need write and OIDC grants that
-    `dry_run` never uses, so they run on fork pull requests (tokens
-    without write access) and on manual runs of the default branch,
-    and skip wherever unreviewed workflow changes on a branch of this
-    repository would run with them;
+    release file, and again on the fixture's merge commit that adds
+    `releases/workspace-0.1.0.yaml`, with `path_prefix:
+    variants/workspace`. That version is the workspace variant's, whose
+    publishable members carry names crates.io refuses, so the dry run
+    always finds them absent. The dry runs need write and OIDC grants
+    that `dry_run` never uses, so they run on fork pull requests
+    (tokens without write access) and on manual runs of the default
+    branch, and skip wherever unreviewed workflow changes on a branch
+    of this repository would run with them;
   - a final job that checks the artefacts the lanes left: the resolved
     lockfile, the SBOM contents, the dependency-change sidecar, both
-    platforms' binaries, the MSRV leg and the packaged crates.
+    platforms' binaries, the MSRV leg and the packaged crates. It also
+    checks the merge calls' outputs: no release on the first, and on
+    the second `has_release: true`, version `0.1.0`, and both
+    publishable members, without the `publish = false` one, in
+    `crate_name` from crate verification.
 - `testing.yaml` does not exercise the publish path: nobody can take a
   crates.io version back. `test-rust-project`'s own tag releases
-  exercise it instead. The merge lane's release path needs a fixture
-  commit that adds a `releases/` file, listed under Follow-ups; local
-  step tests cover the release-file parsing meanwhile. A CBOM scan
+  exercise it instead. A CBOM scan
   waits on Rust support upstream (Q13): a fixture in another language
   would test cbom-action, not this lane.
 
@@ -680,15 +686,14 @@ proposal.
 
 <!-- markdownlint-disable MD013 -->
 
-| Repository             | Item                                                                             | State                                                           |
-| ---------------------- | -------------------------------------------------------------------------------- | --------------------------------------------------------------- |
-| `rust-workflows`       | Lanes #4, #6 (epic #8)                                                           | Implemented; first release pending                              |
-| `rust-workflows`       | Release lane #5                                                                  | Implemented; open until `test-rust-project` releases through it |
-| `rust-workflows`       | Check `releases/` files at verify time (docker parity #36)                       | Open                                                            |
-| `test-rust-project`    | Release through this repository's release lane (#5)                              | After the first release of this repository                      |
-| `test-rust-project`    | A fixture commit that adds a `releases/` file, for the merge lane's release path | Open                                                            |
-| `test-rust-project`    | One tag-push workflow (#15)                                                      | In review                                                       |
-| `cbom-action`          | CBOM coverage for Rust (#10)                                                     | No upstream support; waiting on CBOMkit                         |
-| `nexus-publish-action` | Nexus Cargo repositories for snapshots (#185)                                    | Not available on LF Nexus; snapshots stay artefacts (Q8)        |
+| Repository             | Item                                                       | State                                                           |
+| ---------------------- | ---------------------------------------------------------- | --------------------------------------------------------------- |
+| `rust-workflows`       | Lanes #4, #6 (epic #8)                                     | Implemented; first release pending                              |
+| `rust-workflows`       | Release lane #5                                            | Implemented; open until `test-rust-project` releases through it |
+| `rust-workflows`       | Check `releases/` files at verify time (docker parity #36) | Open                                                            |
+| `test-rust-project`    | Release through this repository's release lane (#5)        | After the first release of this repository                      |
+| `test-rust-project`    | One tag-push workflow (#15)                                | In review                                                       |
+| `cbom-action`          | CBOM coverage for Rust (#10)                               | No upstream support; waiting on CBOMkit                         |
+| `nexus-publish-action` | Nexus Cargo repositories for snapshots (#185)              | Not available on LF Nexus; snapshots stay artefacts (Q8)        |
 
 <!-- markdownlint-enable MD013 -->

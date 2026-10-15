@@ -287,12 +287,13 @@ repository at the commit already running, against
   `features`), across two platforms for the root crate;
 - the release lane as a dry run on the signed tag `v0.1.1`;
 - the merge lane as a dry run, on a commit without a release file;
-- a final job that inspects the artefacts the lanes left behind.
+- the merge lane's release path as a dry run, on a commit that adds
+  `releases/workspace-0.1.0.yaml` for the `workspace` variant;
+- a final job that inspects the artefacts the lanes left behind and
+  the merge calls' outputs.
 
 Nobody can take a crates.io version back, so the publish path itself
-runs in test-rust-project's own releases. The merge lane's release
-path awaits a fixture addition in test-rust-project, which
-[`docs/BRIEF.md`](docs/BRIEF.md) lists.
+runs in test-rust-project's own releases.
 
 [pre-commit.ci results page]: https://results.pre-commit.ci/latest/github/lfreleng-actions/rust-workflows/main
 [pre-commit.ci status badge]: https://results.pre-commit.ci/badge/github/lfreleng-actions/rust-workflows/main.svg
