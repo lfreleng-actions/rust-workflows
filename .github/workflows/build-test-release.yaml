@@ -1226,10 +1226,6 @@ jobs:
       crate_name: ${{ steps.verify.outputs.crate_name }}
       crate_version: ${{ steps.verify.outputs.crate_version }}
       crate_sha256: ${{ steps.verify.outputs.crate_sha256 }}
-    env:
-      # The publisher has no toolchain input; it pins whatever rustup
-      # selects, which honours this variable (BRIEF Q3).
-      RUSTUP_TOOLCHAIN: ${{ needs.rust-metadata.outputs.toolchain }}
     steps:
       - name: 'Load egress allow-list'
         # yamllint disable-line rule:line-length
@@ -1275,15 +1271,35 @@ jobs:
           name: ${{ needs.rust-metadata.outputs.lockfile_artefact }}
           path: ${{ needs.rust-metadata.outputs.lockfile_dir }}
 
-      - name: 'Install the toolchain'
+      # The publisher installs a minimal toolchain, but a project whose
+      # .cargo/config.toml selects a target from its toolchain file
+      # needs that target to verify the packaged crate, as may the
+      # setup script. Install the file's targets and components for
+      # the run's toolchain before both, from outside the checkout
+      # and with the environment scrub.
+      - name: 'Install the toolchain file targets'
+        # yamllint disable-line rule:line-length
+        if: needs.rust-metadata.outputs.toolchain_targets != '' || needs.rust-metadata.outputs.toolchain_components != ''
         shell: bash
+        env:
+          TOOLCHAIN: ${{ needs.rust-metadata.outputs.toolchain }}
+          # yamllint disable-line rule:line-length
+          COMPONENTS: ${{ needs.rust-metadata.outputs.toolchain_components }}
+          TARGETS: ${{ needs.rust-metadata.outputs.toolchain_targets }}
         run: |
-          # Install the toolchain
-          # From outside the checkout, so no project configuration
-          # applies, and with the environment scrub the actions apply
-          # (docs/BRIEF.md Q4).
+          # Install the toolchain file targets
           set -euo pipefail
-          cd "$RUNNER_TEMP"
+          args=(toolchain install "$TOOLCHAIN" --profile minimal
+            --no-self-update)
+          # Comma-separated names rust-metadata already validated.
+          IFS=',' read -r -a items <<< "$COMPONENTS"
+          for item in ${items[@]+"${items[@]}"}; do
+            args+=(--component "$item")
+          done
+          IFS=',' read -r -a items <<< "$TARGETS"
+          for item in ${items[@]+"${items[@]}"}; do
+            args+=(--target "$item")
+          done
           scrub=(env -u CARGO_REGISTRY_TOKEN
             -u ACTIONS_ID_TOKEN_REQUEST_TOKEN
             -u ACTIONS_ID_TOKEN_REQUEST_URL -u ACTIONS_RUNTIME_TOKEN
@@ -1293,19 +1309,20 @@ jobs:
             scrub+=(-u "$name")
           done < <(compgen -e | grep -E '^CARGO_REGISTRIES_.+_TOKEN$' \
             || true)
-          "${scrub[@]}" rustup toolchain install "$RUSTUP_TOOLCHAIN" \
-            --profile minimal --no-self-update
-          "${scrub[@]}" cargo --version
+          cd "$RUNNER_TEMP"
+          "${scrub[@]}" rustup "${args[@]}"
 
       # The publisher takes no setup_script, yet this job compiles the
       # packaged crates. Run the script here with the checks and the
-      # environment scrub the actions apply.
+      # environment scrub the actions apply, and with the run's
+      # toolchain installed and selected, since it may call cargo.
       - name: 'Run the setup script'
         if: inputs.setup_script != ''
         shell: bash
         env:
           PATH_PREFIX: ${{ inputs.path_prefix }}
           SETUP_SCRIPT: ${{ inputs.setup_script }}
+          RUSTUP_TOOLCHAIN: ${{ needs.rust-metadata.outputs.toolchain }}
         run: |
           # Run the setup script
           set -euo pipefail
@@ -1345,6 +1362,10 @@ jobs:
             scrub+=(-u "$name")
           done < <(compgen -e | grep -E '^CARGO_REGISTRIES_.+_TOKEN$' \
             || true)
+          # From outside the checkout, so no project configuration
+          # applies (docs/BRIEF.md Q4). The publisher finds it later.
+          (cd "$RUNNER_TEMP" && "${scrub[@]}" rustup toolchain install \
+            "$RUSTUP_TOOLCHAIN" --profile minimal --no-self-update)
           cd "$project"
           "${scrub[@]}" bash "$script"
 
@@ -1358,6 +1379,7 @@ jobs:
           workspace: ${{ inputs.workspace }}
           packages: ${{ inputs.packages }}
           exclude: ${{ inputs.exclude }}
+          toolchain: ${{ needs.rust-metadata.outputs.toolchain }}
           release_tag: ${{ needs.tag-validate.outputs.tag }}
           semver_checks: ${{ inputs.semver_checks }}
           dry_run: 'true'
@@ -1650,8 +1672,6 @@ jobs:
     timeout-minutes: 15
     outputs:
       publish_status: ${{ steps.publish.outputs.publish_status }}
-    env:
-      RUSTUP_TOOLCHAIN: ${{ needs.rust-metadata.outputs.toolchain }}
     steps:
       - name: 'Load egress allow-list'
         # yamllint disable-line rule:line-length
@@ -1697,30 +1717,6 @@ jobs:
           name: ${{ needs.rust-metadata.outputs.lockfile_artefact }}
           path: ${{ needs.rust-metadata.outputs.lockfile_dir }}
 
-      # The archive digest depends on the Cargo that packages it, so
-      # this job installs the toolchain crate-verify used.
-      - name: 'Install the toolchain'
-        shell: bash
-        run: |
-          # Install the toolchain
-          # From outside the checkout, so no project configuration
-          # applies, and with the environment scrub the actions apply
-          # (docs/BRIEF.md Q4).
-          set -euo pipefail
-          cd "$RUNNER_TEMP"
-          scrub=(env -u CARGO_REGISTRY_TOKEN
-            -u ACTIONS_ID_TOKEN_REQUEST_TOKEN
-            -u ACTIONS_ID_TOKEN_REQUEST_URL -u ACTIONS_RUNTIME_TOKEN
-            -u GITHUB_OUTPUT -u GITHUB_ENV -u GITHUB_PATH
-            -u GITHUB_STATE -u GITHUB_STEP_SUMMARY)
-          while IFS= read -r name; do
-            scrub+=(-u "$name")
-          done < <(compgen -e | grep -E '^CARGO_REGISTRIES_.+_TOKEN$' \
-            || true)
-          "${scrub[@]}" rustup toolchain install "$RUSTUP_TOOLCHAIN" \
-            --profile minimal --no-self-update
-          "${scrub[@]}" cargo --version
-
       # Exchanges this job's OIDC token for a short-lived crates.io
       # token, which the action's post step revokes.
       - name: 'Authenticate to crates.io'
@@ -1738,6 +1734,9 @@ jobs:
           workspace: ${{ inputs.workspace }}
           packages: ${{ inputs.packages }}
           exclude: ${{ inputs.exclude }}
+          # The archive digest depends on the Cargo that packages it,
+          # so publish with the toolchain crate-verify used.
+          toolchain: ${{ needs.rust-metadata.outputs.toolchain }}
           release_tag: ${{ needs.tag-validate.outputs.tag }}
           registry_token: ${{ steps.auth.outputs.token }}
           expected_sha256: ${{ needs.crate-verify.outputs.crate_sha256 }}

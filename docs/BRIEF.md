@@ -87,7 +87,7 @@ feature or component selection.
 | `packages`                                            | `''`                             | ✅    | ✅   |       | ✅      | Named packages; a non-empty value replaces `--workspace`                                |
 | `exclude`                                             | `''`                             | ✅    | ✅   |       | ✅      | Members to skip; needs `workspace: true` and empty `packages`                           |
 | `features` / `all_features` / `no_default_features`   | `''` / `false` / `false`         | ✅    | ✅   |       |         | Cargo feature selection                                                                 |
-| `toolchain`                                           | `''`                             | ✅    | ✅   | ✅    |         | Override the toolchain; empty uses the project's toolchain file                         |
+| `toolchain`                                           | `''`                             | ✅    | ✅   | ✅    | ✅      | Override the toolchain; empty uses the project's toolchain file                         |
 | `toolchain_components` / `toolchain_targets`          | `''` / `''`                      | ✅    | ✅   |       |         | rustup components and targets to install for the resolved toolchain                     |
 | `lockfile_required`                                   | `false`                          | ✅    | ✅   | ✅    |         | Fail when `Cargo.lock` is absent, and build with `--locked`                             |
 | `setup_script`                                        | `''`                             | ✅    | ✅   |       |         | Committed script run before cargo (system packages, native libraries)                   |
@@ -106,11 +106,10 @@ step, so a typo cannot flip a default.
 
 The build, test and audit actions report `toolchain`, `toolchain_kind`,
 `cargo_version` and `rustc_version` outputs, so a workflow can show and
-compare what each job ran. The publisher reports `cargo_version` alone
-and has no `toolchain` input: it pins whatever rustup selects for the
-project, which honours `RUSTUP_TOOLCHAIN` (Q3 relies on that). It also
-takes `registry`, to publish to a named Cargo registry, and
-`semver_checks`.
+compare what each job ran. The publisher reports `cargo_version` and,
+from v0.2.0, `toolchain`, and takes a `toolchain` input like the
+others. It also takes `registry`, to publish to a named Cargo registry,
+and `semver_checks`.
 
 ### Q3: One toolchain per run
 
@@ -183,15 +182,20 @@ build and test jobs pass them as `toolchain_components` and
 `toolchain_targets`, which install them for the forwarded toolchain in
 one rustup call. The audit compiles nothing and needs neither.
 
-The publisher needs the same pin by another route, since it has no
-`toolchain` input. In `crate-verify` and `publish`, the workflow
-installs the resolved toolchain and sets `RUSTUP_TOOLCHAIN` to it on
-the publisher step; the action resolves its toolchain through
-`rustup show active-toolchain`, which honours that variable, and pins
-the result for every cargo call. Both jobs must run the same Cargo,
-because the archive digest `publish` checks depends on the Cargo
-version that packaged it. Once the publisher gains a `toolchain` input,
-the workflow passes it like any other action's.
+The publisher takes the same pin through its `toolchain` input. In
+`crate-verify` and `publish`, the workflow passes it the resolved
+toolchain, which the action installs when missing, from outside the
+checkout and with its own environment scrub, and pins for every cargo
+call. Both jobs must run the same Cargo, because the archive digest
+`publish` checks depends on the Cargo version that packaged it.
+
+The action installs a minimal toolchain, without the toolchain file's
+`components` and `targets`. `crate-verify` compiles the packaged
+crates, so when the file lists either, the workflow installs them for
+the resolved toolchain first, in one scrubbed `rustup` call from
+outside the checkout. A project whose `.cargo/config.toml` selects a
+target from that list then verifies as it builds. `publish` compiles
+nothing and needs neither.
 
 ### Q4: Environment scrub (defence in depth)
 
@@ -334,7 +338,9 @@ tag-validate -> rust-metadata -> build
 - The publisher has no `setup_script` input, yet `crate-verify`
   compiles. When the caller sets `setup_script`, the workflow runs it
   as its own step first, in both models, with the same path validation
-  and environment scrub the actions apply. The publish job never runs
+  and environment scrub the actions apply. That step installs the
+  resolved toolchain first and selects it through `RUSTUP_TOOLCHAIN`,
+  since the script may call cargo. The publish job never runs
   it: that job compiles nothing, so it needs no native libraries.
 - `attach-artefacts` drafts the release when release-drafter has not,
   and attaches the `.crate` files, binaries, SBOMs and a `SHA256SUMS`
