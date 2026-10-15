@@ -405,6 +405,11 @@ check-release -> rust-metadata -> build
   dispatch names a branch, which a later merge can move mid-run. The
   version check, the build, the gates and the upload then all act on
   one commit, and a later merge can't hide this one's release file.
+  A Gerrit dispatch that starts after a later merge has already moved
+  the branch still sees the later commit, though, and can miss its own
+  release file. The fix, a follow-up, is node-workflows' approach:
+  resolve the merged commit from Gerrit, starting at the dispatched
+  patchset revision.
 - `crate-verify` waits for every gate as well as `check-release`, and
   every gate must pass, or the caller must have turned it off. Its own
   compile covers the
@@ -574,7 +579,11 @@ member's own graph, or one merged document for a workspace root. When
 the lane acts on more than one member (`workspace: true`, or named
 `packages`), the job scans the workspace root that `rust-metadata`
 resolved, so the SBOM covers everything the build does; for a single
-package it scans that manifest's directory. It
+package it scans that manifest's directory. The action passes no
+feature flags, so the SBOM describes the default features: a
+dependency behind a feature the lane enables through `features` or
+`all_features` can be missing until sbom-action gains feature
+selection (a follow-up). It
 never lists dev-dependencies (the tool has no option for them);
 `sbom_include_dev: true` keeps build-dependencies, marked
 `scope: excluded`. The job keeps CycloneDX 1.5, the action's default
@@ -702,6 +711,8 @@ proposal.
 | `rust-workflows`            | Release lane #5                                                                               | Implemented; open until `test-rust-project` releases through it       |
 | `rust-workflows`            | Check `releases/` files at verify time (docker parity #36)                                    | Open                                                                  |
 | `rust-workflows`            | A `version_source` input (`manifest` or `tag`) on the release lane: tag-based versioning (Q7) | After rust-build-action #11 and rust-crate-publish-action #21 release |
+| `rust-workflows`            | Merge lane: resolve the merged commit for Gerrit dispatches, as node-workflows does (Q8)      | Open                                                                  |
+| `sbom-action`               | Cargo feature selection, which the lanes then forward from `features` (Q13)                   | Open                                                                  |
 | `test-rust-project`         | Release through this repository's release lane (#5)                                           | After the first release of this repository                            |
 | `rust-build-action`         | A `version` input, for tag-based versioning (#11)                                             | In review                                                             |
 | `rust-crate-publish-action` | A `version` input, for tag-based versioning (#21)                                             | In review                                                             |
