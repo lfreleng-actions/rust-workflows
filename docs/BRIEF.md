@@ -44,10 +44,10 @@ State on 2026-10-09.
 | Build        | `rust-build-action`         | Released v0.0.2                                                                                       |
 | Test         | `rust-test-action`          | Released v0.0.1                                                                                       |
 | Audit        | `rust-audit-action`         | Released v0.0.1                                                                                       |
-| SBOM         | `sbom-action`               | Released v0.3.0 (`syft` reads `Cargo.lock`); Cargo backend in review (#53)                            |
-| Scan         | `grype-scan-action`         | Released v0.2.0; Cargo graph classification planned (#31, after #25)                                  |
+| SBOM         | `sbom-action`               | Released v0.4.0: `cyclonedx` backend with a `cargo` dependency manager                                |
+| Scan         | `grype-scan-action`         | Released v0.4.0: dependency policy, Cargo graph classification                                        |
 | CBOM         | `cbom-action`               | Released v0.0.1; no Rust coverage upstream (#10), so the lanes scan other languages alone             |
-| Publish      | `rust-crate-publish-action` | Released v0.1.0: named registries, workspace sets, semver checks                                      |
+| Publish      | `rust-crate-publish-action` | Released v0.2.0: named registries, workspace sets, semver checks, `toolchain` input                   |
 | Test fixture | `test-rust-project`         | Crate `lfreleng-test-rust-project` 0.1.1 on crates.io, published through Trusted Publishing; variants |
 
 <!-- markdownlint-enable MD013 -->

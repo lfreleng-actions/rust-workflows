@@ -95,7 +95,7 @@ on:
         required: false
         type: string
         # yamllint disable-line rule:line-length
-        default: 'lfreleng-actions//.github/harden-runner/lfreleng-actions/allow_list.txt@93962991c9e4cc04d77d81e619475c868a226277'  # v0.17.0
+        default: 'lfreleng-actions//.github/harden-runner/lfreleng-actions/allow_list.txt@56d70f0eae78f334a598d1ffe071d4b821517b22'  # v0.17.1
       artefact_suffix:
         description: 'Suffix for the lockfile artefact name'
         required: false
