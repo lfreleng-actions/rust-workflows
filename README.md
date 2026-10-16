@@ -243,7 +243,7 @@ notice (`docs/BRIEF.md` Q8).
 ## CBOM
 
 `cbom-action` can't analyse Rust: CBOMkit and sonar-cryptography have
-no Rust support yet (cbom-action #10). The verify lane's opt-in `cbom`
+no Rust support yet. The verify lane's opt-in `cbom`
 job scans any Java, Python or Go sources a Rust project also carries,
 such as Python bindings, and skips a pure Rust project. It's advisory
 and never fails the run. Don't set `cbom_languages` to `rust`; the lane

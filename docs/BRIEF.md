@@ -647,7 +647,9 @@ gates. A release or merge scan always gates,
 whatever changed, under the policy the caller chose.
 
 CBOM: `cbom-action` covers Java, Python and Go (C# in preview), and
-CBOMkit and sonar-cryptography do not analyse Rust (cbom-action #10).
+CBOMkit and sonar-cryptography do not analyse Rust. Rust coverage
+stays parked, and cbom-action #10, the investigation, stays closed,
+until they do.
 The verify lane carries the Python family's CBOM job, off by default
 (`cbom_enabled: false`) and advisory, so a Rust project with Python
 bindings or Go tooling can scan those sources; on a pure Rust project
@@ -726,17 +728,17 @@ proposal.
 
 <!-- markdownlint-disable MD013 -->
 
-| Repository                  | Item                                                                                          | State                                                                 |
-| --------------------------- | --------------------------------------------------------------------------------------------- | --------------------------------------------------------------------- |
-| `rust-workflows`            | Lanes #4, #6 (epic #8)                                                                        | Implemented; first release pending                                    |
-| `rust-workflows`            | Release lane #5                                                                               | Implemented; open until `test-rust-project` releases through it       |
-| `rust-workflows`            | Check `releases/` files at verify time (docker parity #36)                                    | Open                                                                  |
-| `rust-workflows`            | A `version_source` input (`manifest` or `tag`) on the release lane: tag-based versioning (Q7) | After rust-build-action #11 and rust-crate-publish-action #21 release |
-| `sbom-action`               | Cargo feature selection, which the lanes then forward from `features` (Q13)                   | Open                                                                  |
-| `test-rust-project`         | Release through this repository's release lane (#5)                                           | After the first release of this repository                            |
-| `rust-build-action`         | A `version` input, for tag-based versioning (#11)                                             | In review                                                             |
-| `rust-crate-publish-action` | A `version` input, for tag-based versioning (#21)                                             | In review                                                             |
-| `cbom-action`               | CBOM coverage for Rust (#10)                                                                  | No upstream support; waiting on CBOMkit                               |
-| `nexus-publish-action`      | Nexus Cargo repositories for snapshots (#185)                                                 | Not available on LF Nexus; snapshots stay artefacts (Q8)              |
+| Repository                  | Item                                                                                          | State                                                                    |
+| --------------------------- | --------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------ |
+| `rust-workflows`            | Lanes #4, #6 (epic #8)                                                                        | Implemented; first release pending                                       |
+| `rust-workflows`            | Release lane #5                                                                               | Implemented; open until `test-rust-project` releases through it          |
+| `rust-workflows`            | Check `releases/` files at verify time (docker parity #36)                                    | Open                                                                     |
+| `rust-workflows`            | A `version_source` input (`manifest` or `tag`) on the release lane: tag-based versioning (Q7) | After rust-build-action #11 and rust-crate-publish-action #21 release    |
+| `sbom-action`               | Cargo feature selection, which the lanes then forward from `features` (Q13)                   | Open                                                                     |
+| `test-rust-project`         | Release through this repository's release lane (#5)                                           | After the first release of this repository                               |
+| `rust-build-action`         | A `version` input, for tag-based versioning (#11)                                             | In review                                                                |
+| `rust-crate-publish-action` | A `version` input, for tag-based versioning (#21)                                             | In review                                                                |
+| `cbom-action`               | CBOM coverage for Rust (#10, closed)                                                          | Parked until [CBOMkit](https://github.com/cbomkit/cbomkit) supports Rust |
+| `nexus-publish-action`      | Nexus Cargo repositories for snapshots (#185)                                                 | Not available on LF Nexus; snapshots stay artefacts (Q8)                 |
 
 <!-- markdownlint-enable MD013 -->
