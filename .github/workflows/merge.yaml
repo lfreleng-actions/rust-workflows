@@ -9,7 +9,7 @@
 # are immutable, so every merge proves the commit publishable without
 # spending a version, and a release happens only when the merged change
 # adds a release file under releases/ (-> denotes sequence):
-#   check-release -> rust-metadata -> build
+#   resolve-commit -> check-release -> rust-metadata -> build
 #     -> { tests | audit | sbom -> grype }
 #     -> crate-verify -> publish -> tag (release merges only)
 #
@@ -20,9 +20,11 @@
 # it verified. The tag job creates v<version> on the merged commit once
 # the crates are on crates.io.
 #
-# check-release resolves the merged commit once, and every later job
-# checks out that commit, so a merge landing mid-run cannot give two
-# jobs different trees, nor hide this merge's release file.
+# resolve-commit asks Gerrit for the commit a change-merged dispatch
+# merged, and check-release records the merged commit once; every
+# later job checks out that commit, so a merge landing before or
+# during the run cannot give two jobs different trees, nor hide this
+# merge's release file.
 #
 # The publish job runs from the branch commit, before any tag exists,
 # so restrict publish_environment to the protected branch, and register
@@ -367,8 +369,19 @@ on:
       # --- Gerrit-aware checkout (empty unless dispatched via Gerrit) ---
       gerrit_refspec:
         description: >-
-          Gerrit refspec; on change-merged dispatches, the branch ref
-          (refs/heads/<branch>)
+          Gerrit refspec of the merged change: normally the branch ref
+          a change-merged event carries, or a change ref to re-run an
+          already-merged change. Resolved once, so every job checks out
+          the same commit; it must be on gerrit_branch.
+        required: false
+        type: string
+        default: ''
+      gerrit_patchset_revision:
+        description: >-
+          The triggering change's revision (GERRIT_PATCHSET_REVISION).
+          Pins the run to the commit that merged it; without it a
+          branch refspec checks out whatever the branch tip is when the
+          run resolves it.
         required: false
         type: string
         default: ''
@@ -494,9 +507,146 @@ jobs:
           fi
           exit "$failed"
 
+  # Resolve, once, the commit a Gerrit dispatch checks out, as
+  # node-workflows does (its #119).
+  #
+  # A change-merged event's refspec is usually the branch ref, and
+  # checking that out means getting whatever the branch tip is when
+  # the run starts. A dispatch that waits behind an earlier run sees a
+  # later merge's commit instead, compares that with its first parent,
+  # and misses its own release file. check-release, and through its
+  # sha output every later job, checks out the SHA resolved here.
+  #
+  # Resolution asks Gerrit, never the mirror, and starts from the
+  # triggering revision (gerrit_patchset_revision) when the caller
+  # forwards it. Under a merge-if-necessary or merge-always submit
+  # type that revision need not be the commit on the branch: Gerrit
+  # may have merged it with a merge commit. So the merged commit is
+  # the first-parent commit that brought the revision onto the branch,
+  # the revision itself when it was fast-forwarded.
+  #
+  # The revision must be on the target branch. Re-dispatching a
+  # merged release change by its change ref is a legitimate recovery;
+  # an unmerged patchset would publish code nobody merged, so the job
+  # refuses it.
+  resolve-commit:
+    name: 'Resolve Commit'
+    needs: gerrit-validate
+    runs-on: ubuntu-latest
+    outputs:
+      commit: ${{ steps.resolve.outputs.commit }}
+    # Reads Gerrit over HTTPS and checks nothing out
+    permissions: {}
+    timeout-minutes: 5
+    steps:
+      - name: 'Load egress allow-list'
+        if: inputs.gerrit_refspec != ''
+        # yamllint disable-line rule:line-length
+        uses: lfreleng-actions/harden-runner-block-action@51ef68401547a8b648275129b9a21544612596d5  # v0.13.1
+        with:
+          config: ${{ inputs.harden_runner_allowlist }}
+          allow_list_summary: 'false'
+      - name: 'Harden runner'
+        if: inputs.gerrit_refspec != ''
+        # yamllint disable-line rule:line-length
+        uses: step-security/harden-runner@ccd8616d44fd3846e67624a50d5aad6d37bf2d25  # v2.22.1
+        with:
+          # yamllint disable-line rule:line-length
+          egress-policy: ${{ inputs.harden_runner_egress == 'audit' && 'audit' || 'block' }}
+          allowed-endpoints: >
+            ${{ env.CONNECTION_ALLOW_LIST }}
+
+      # The GitHub-native path checks out inputs.ref, or the pushed
+      # commit; check-release resolves that, so there is nothing to do.
+      - name: 'Resolve the merged commit'
+        id: resolve
+        if: inputs.gerrit_refspec != ''
+        shell: bash
+        env:
+          GERRIT_REFSPEC: ${{ inputs.gerrit_refspec }}
+          GERRIT_BRANCH: ${{ inputs.gerrit_branch }}
+          REVISION: ${{ inputs.gerrit_patchset_revision }}
+          # yamllint disable-line rule:line-length
+          GERRIT_URL: ${{ inputs.gerrit_url != '' && inputs.gerrit_url || vars.GERRIT_URL }}
+          GERRIT_PROJECT: ${{ inputs.gerrit_project }}
+        run: |
+          # Resolve the triggering revision against Gerrit's branch
+          if [ -n "${REVISION}" ] \
+            && [[ ! "${REVISION}" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::gerrit_patchset_revision must be a full" \
+              "40-character commit SHA"
+            exit 1
+          fi
+          repo="${RUNNER_TEMP}/resolve-commit"
+          rm -rf "${repo}"
+          git init -q "${repo}"
+          cd "${repo}"
+          remote="${GERRIT_URL}/${GERRIT_PROJECT}"
+          branch_ref='refs/remotes/gerrit/branch'
+          # The whole branch history: mapping a revision to the commit
+          # that merged it, and proving ancestry, both walk it
+          if ! git fetch -q --no-tags -- "${remote}" \
+            "+refs/heads/${GERRIT_BRANCH}:${branch_ref}" 2> /dev/null; then
+            echo "::error::Cannot fetch ${GERRIT_BRANCH} from Gerrit"
+            exit 1
+          fi
+          if [ -n "${REVISION}" ]; then
+            revision="${REVISION}"
+            if ! git cat-file -e "${revision}^{commit}" 2> /dev/null \
+              && ! git fetch -q --no-tags -- "${remote}" \
+                "${revision}" 2> /dev/null; then
+              echo "::error::Gerrit does not serve revision" \
+                "${revision}"
+              exit 1
+            fi
+          elif [ "${GERRIT_REFSPEC}" = "refs/heads/${GERRIT_BRANCH}" ]; then
+            # No triggering revision to anchor on: the branch tip is
+            # the closest available, but a merge landing between the
+            # event and this job moves it. Forward
+            # GERRIT_PATCHSET_REVISION to pin the exact change.
+            echo "::notice::No gerrit_patchset_revision; building the" \
+              "current tip of ${GERRIT_BRANCH}"
+            revision=$(git rev-parse "${branch_ref}")
+          else
+            if ! git fetch -q --no-tags -- "${remote}" \
+              "${GERRIT_REFSPEC}" 2> /dev/null; then
+              echo "::error::Cannot fetch ${GERRIT_REFSPEC} from Gerrit"
+              exit 1
+            fi
+            revision=$(git rev-parse 'FETCH_HEAD^{commit}')
+          fi
+          if ! git merge-base --is-ancestor "${revision}" "${branch_ref}"
+          then
+            echo "::error::Revision ${revision} is not on" \
+              "${GERRIT_BRANCH}; refusing to build or publish an" \
+              "unmerged change"
+            exit 1
+          fi
+          # The commit Gerrit put on the branch for this revision: the
+          # revision itself when fast-forwarded, otherwise the oldest
+          # first-parent commit descending from it, i.e. its merge.
+          # Listed into a variable rather than piped to grep -q, which
+          # can exit early and SIGPIPE rev-list under pipefail.
+          mainline=$(git rev-list --first-parent "${branch_ref}")
+          if grep -qx "${revision}" <<< "${mainline}"; then
+            commit="${revision}"
+          else
+            commit=$(git rev-list --first-parent \
+              --ancestry-path="${revision}" \
+              "${revision}..${branch_ref}" | tail -n 1)
+          fi
+          if [[ ! "${commit}" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::Cannot find the commit that merged" \
+              "${revision} onto ${GERRIT_BRANCH}"
+            exit 1
+          fi
+          echo "Building ${commit} (merged ${revision} on" \
+            "${GERRIT_BRANCH})"
+          echo "commit=${commit}" >> "$GITHUB_OUTPUT"
+
   repository-metadata:
     name: 'Repository Metadata'
-    needs: gerrit-validate
+    needs: resolve-commit
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -523,7 +673,7 @@ jobs:
         # yamllint disable-line rule:line-length
         uses: lfreleng-actions/checkout-gerrit-change-action@35e98c8043ec411611e464e296bcfb441a5c5093  # v1.1.2
         with:
-          gerrit-refspec: ${{ inputs.gerrit_refspec }}
+          gerrit-refspec: ${{ needs.resolve-commit.outputs.commit }}
           gerrit-project: ${{ inputs.gerrit_project }}
           # yamllint disable-line rule:line-length
           gerrit-url: ${{ inputs.gerrit_url != '' && inputs.gerrit_url || vars.GERRIT_URL }}
@@ -581,10 +731,11 @@ jobs:
   # A release is a merged commit that adds one file under releases/
   # carrying a 'version: X.Y.Z' line. Merge commits compare with their
   # first parent, so a merged branch counts as one change. This job
-  # also resolves the commit every later job checks out.
+  # also records the commit every later job checks out: on the Gerrit
+  # path, the one resolve-commit chose.
   check-release:
     name: 'Check for Release File'
-    needs: gerrit-validate
+    needs: resolve-commit
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -608,15 +759,15 @@ jobs:
           allowed-endpoints: >
             ${{ env.CONNECTION_ALLOW_LIST }}
 
-      # On a Gerrit change-merged dispatch, gerrit_refspec is the branch
-      # ref, so both paths land on the merged commit. On the Gerrit
-      # path, depth 2 lets diff-tree compare it with its parent.
+      # The Gerrit path checks out the commit resolve-commit chose,
+      # never the branch tip, which a later merge may already have
+      # moved. Depth 2 lets diff-tree compare it with its parent.
       - name: 'Checkout Gerrit change'
         if: inputs.gerrit_refspec != ''
         # yamllint disable-line rule:line-length
         uses: lfreleng-actions/checkout-gerrit-change-action@35e98c8043ec411611e464e296bcfb441a5c5093  # v1.1.2
         with:
-          gerrit-refspec: ${{ inputs.gerrit_refspec }}
+          gerrit-refspec: ${{ needs.resolve-commit.outputs.commit }}
           gerrit-project: ${{ inputs.gerrit_project }}
           # yamllint disable-line rule:line-length
           gerrit-url: ${{ inputs.gerrit_url != '' && inputs.gerrit_url || vars.GERRIT_URL }}

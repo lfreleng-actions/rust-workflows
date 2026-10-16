@@ -69,7 +69,7 @@ Release:  tag-validate -> rust-metadata -> build
             -> { audit | sbom -> grype } -> tests
             -> crate-verify -> attach-artefacts -> publish -> promote-release
 
-Merge:    check-release -> rust-metadata -> build
+Merge:    resolve-commit -> check-release -> rust-metadata -> build
             -> { tests | audit | sbom -> grype }
             -> crate-verify -> publish -> tag
 ```
@@ -228,6 +228,17 @@ they check out the change with `checkout-gerrit-change-action` instead
 of `actions/checkout`. Voting and comments live in the `gerrit.yaml`
 caller examples, never inside the reusable workflows, which need no
 Gerrit secret.
+
+On a change-merged dispatch the merge lane's `resolve-commit` job asks
+Gerrit, not the mirror, for the commit that merged the change, and
+every job checks out that commit. Forward `GERRIT_PATCHSET_REVISION`
+as `gerrit_patchset_revision`, as `examples/merge/gerrit.yaml` does:
+the lane then checks out the change itself when Gerrit fast-forwarded
+it, or its merge commit, so a merge landing first can't hide this
+one's release file. A revision missing from the branch, such as a
+patch set that a rebase or cherry-pick replaced, fails the run.
+Without the input the lane checks out the branch tip and emits a
+notice (`docs/BRIEF.md` Q8).
 
 ## CBOM
 

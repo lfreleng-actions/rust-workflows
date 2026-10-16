@@ -378,7 +378,7 @@ crates.io has no snapshots, and its versions are immutable, so Model B
 changes shape for Rust:
 
 ```text
-check-release -> rust-metadata -> build
+resolve-commit -> check-release -> rust-metadata -> build
   -> { tests | audit | sbom -> grype }
   -> crate-verify -> publish -> tag
 ```
@@ -400,16 +400,36 @@ check-release -> rust-metadata -> build
   passes `v<version>` as the publisher's `release_tag`, which requires
   every crate version to equal it; `publish` uploads; and the `tag` job
   then creates `v<version>` on the merged commit.
-- `check-release` resolves the merged commit once, and every later
-  job checks out that commit on both checkout paths: a Gerrit
-  dispatch names a branch, which a later merge can move mid-run. The
-  version check, the build, the gates and the upload then all act on
-  one commit, and a later merge can't hide this one's release file.
-  A Gerrit dispatch that starts after a later merge has already moved
-  the branch still sees the later commit, though, and can miss its own
-  release file. The fix, a follow-up, is node-workflows' approach:
-  resolve the merged commit from Gerrit, starting at the dispatched
-  patchset revision.
+- `check-release` records the merged commit once, and every later
+  job checks out that commit on both checkout paths. The version
+  check, the build, the gates and the upload then all act on one
+  commit, and a later merge can't hide this one's release file.
+- A Gerrit dispatch names a branch, which a later merge can move
+  before the run starts, so `resolve-commit` asks Gerrit, not the
+  mirror, which commit merged the change, as node-workflows does.
+  The caller forwards `GERRIT_PATCHSET_REVISION` as
+  `gerrit_patchset_revision`, and the job maps that revision to the
+  commit Gerrit put on the branch. A dispatch that starts after a
+  later merge then still checks out its own commit and finds its own
+  release file. By submit type:
+  - Fast forward, or a rebase if necessary that needed no rebase: the
+    revision sits on the branch's first-parent history, and the run
+    checks it out.
+  - Merge if necessary, merge always: when Gerrit writes a merge
+    commit, the run checks out the oldest first-parent commit that
+    descends from the revision, its merge. `check-release` compares
+    that merge with its first parent, so the release file the change
+    adds still counts.
+  - Rebase if necessary, rebase always, cherry pick: Gerrit writes a
+    new commit. The run resolves it when the dispatcher forwards that
+    commit's revision. A revision missing from the branch, such as
+    the patch set before the rebase, fails the run: the lane won't
+    build or publish code nobody merged.
+- Without `gerrit_patchset_revision` the run checks out the branch
+  tip, as before, and emits a notice naming the input; a later merge
+  can then still hide this one's release file. A change ref in
+  `gerrit_refspec` re-runs a merged change; an unmerged one fails the
+  run.
 - `crate-verify` waits for every gate as well as `check-release`, and
   every gate must pass, or the caller must have turned it off. Its own
   compile covers the
@@ -506,6 +526,7 @@ match the Python family where the meaning matches.
 | `grype_dependency_policy`, `grype_transitive_fail_on`             | grype                 | `all`, `none` (Q13)                                                  |
 | `harden_runner_egress`, `harden_runner_allowlist`                 | harden-runner         | `block`, pinned organisation list                                    |
 | `gerrit_refspec`, `gerrit_project`, `gerrit_branch`, `gerrit_url` | Gerrit-aware checkout | `''`                                                                 |
+| `gerrit_patchset_revision` (merge lane)                           | resolve-commit        | `''` (Q8)                                                            |
 | `runners`                                                         | build, tests          | `[{"runner":"ubuntu-latest","arch":"x64"}]` (D4)                     |
 | `cache`                                                           | build, tests          | `false` (D1)                                                         |
 | `build_timeout_minutes`, `test_timeout_minutes`                   | build, tests          | `20`, `20` (D6)                                                      |
@@ -711,7 +732,6 @@ proposal.
 | `rust-workflows`            | Release lane #5                                                                               | Implemented; open until `test-rust-project` releases through it       |
 | `rust-workflows`            | Check `releases/` files at verify time (docker parity #36)                                    | Open                                                                  |
 | `rust-workflows`            | A `version_source` input (`manifest` or `tag`) on the release lane: tag-based versioning (Q7) | After rust-build-action #11 and rust-crate-publish-action #21 release |
-| `rust-workflows`            | Merge lane: resolve the merged commit for Gerrit dispatches, as node-workflows does (Q8)      | Open                                                                  |
 | `sbom-action`               | Cargo feature selection, which the lanes then forward from `features` (Q13)                   | Open                                                                  |
 | `test-rust-project`         | Release through this repository's release lane (#5)                                           | After the first release of this repository                            |
 | `rust-build-action`         | A `version` input, for tag-based versioning (#11)                                             | In review                                                             |
