@@ -355,7 +355,7 @@ on:
         required: false
         type: string
         # yamllint disable-line rule:line-length
-        default: 'lfreleng-actions//.github/harden-runner/lfreleng-actions/allow_list.txt@56d70f0eae78f334a598d1ffe071d4b821517b22'  # v0.17.1
+        default: 'lfreleng-actions//.github/harden-runner/lfreleng-actions/allow_list.txt@084d6861688632b2edb6bde3c180145bebf9cc7a'  # v0.17.2
 
       # --- Gerrit-aware checkout (empty unless dispatched via Gerrit) ---
       gerrit_refspec:
@@ -626,7 +626,7 @@ jobs:
       - name: 'Build'
         id: build
         # yamllint disable-line rule:line-length
-        uses: lfreleng-actions/rust-build-action@b1d7fdb06b77e4f6f83a0c9aa4369749b7dbfc1e  # v0.0.2
+        uses: lfreleng-actions/rust-build-action@06de2240463f32df4f3a8262c518aa8ea873057e  # v0.1.0
         with:
           path_prefix: ${{ inputs.path_prefix }}
           manifest_path: ${{ inputs.manifest_path }}
@@ -933,7 +933,7 @@ jobs:
       - name: 'Generate SBOM'
         id: sbom
         # yamllint disable-line rule:line-length
-        uses: lfreleng-actions/sbom-action@cd6b02f4d099fc19153b505c9faa7bd01ccfa0e5  # v0.4.0
+        uses: lfreleng-actions/sbom-action@f394b50598df99634434da3dc231e14e74a690c8  # v0.5.0
         env:
           RUSTUP_TOOLCHAIN: ${{ needs.rust-metadata.outputs.toolchain }}
         with:
