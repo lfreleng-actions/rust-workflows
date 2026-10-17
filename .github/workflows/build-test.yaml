@@ -948,6 +948,11 @@ jobs:
           # Cargo.toml the action needs.
           # yamllint disable-line rule:line-length
           path_prefix: ${{ (inputs.workspace || inputs.packages != '') && needs.rust-metadata.outputs.lockfile_dir || needs.rust-metadata.outputs.manifest_dir }}
+          # The build's feature selection, so the SBOM describes the
+          # graph the build compiled rather than the default features.
+          cargo_features: ${{ inputs.features }}
+          cargo_all_features: ${{ inputs.all_features }}
+          cargo_no_default_features: ${{ inputs.no_default_features }}
           sbom_format: ${{ inputs.sbom_format }}
           include_dev: ${{ inputs.sbom_include_dev }}
           output_directory: ${{ runner.temp }}/sbom

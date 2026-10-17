@@ -600,11 +600,11 @@ member's own graph, or one merged document for a workspace root. When
 the lane acts on more than one member (`workspace: true`, or named
 `packages`), the job scans the workspace root that `rust-metadata`
 resolved, so the SBOM covers everything the build does; for a single
-package it scans that manifest's directory. The action passes no
-feature flags, so the SBOM describes the default features: a
-dependency behind a feature the lane enables through `features` or
-`all_features` can be missing until sbom-action gains feature
-selection (sbom-action #64, in review). The action also runs Cargo
+package it scans that manifest's directory. The job forwards
+`features`, `all_features` and `no_default_features` as sbom-action's
+`cargo_features`, `cargo_all_features` and `cargo_no_default_features`
+(v0.5.0), so the SBOM describes the graph the build compiled, optional
+dependencies included. The action also runs Cargo
 in the directory it scans, so when the job scans the workspace root a
 `.cargo/config.toml` under `path_prefix` doesn't apply: a member-local
 source replacement or patch can make the SBOM step fail after a
@@ -739,7 +739,6 @@ proposal.
 | `rust-workflows`       | Release lane #5                                                                                                     | Implemented; open until `test-rust-project` releases through it                          |
 | `rust-workflows`       | Check `releases/` files at verify time (docker parity #36)                                                          | Open                                                                                     |
 | `rust-workflows`       | A `version_source` input (`manifest` or `tag`) on the release lane: tag-based versioning (Q7)                       | Unblocked: rust-build-action v0.1.0 and rust-crate-publish-action v0.3.0 carry `version` |
-| `sbom-action`          | Cargo feature selection, which the lanes then forward from `features` (Q13)                                         | In review (sbom-action #64)                                                              |
 | `sbom-action`          | A Cargo working directory separate from the scanned manifest, so `path_prefix` keeps its `.cargo/config.toml` (Q13) | Open                                                                                     |
 | `test-rust-project`    | Release through this repository's release lane (#5)                                                                 | After the first release of this repository                                               |
 | `cbom-action`          | CBOM coverage for Rust (#10, closed)                                                                                | Parked until [CBOMkit](https://github.com/cbomkit/cbomkit) supports Rust                 |
