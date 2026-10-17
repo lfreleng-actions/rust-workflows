@@ -379,7 +379,7 @@ alongside the manifest versioning the lane started with, through
 
 Under `tag` the tests, audit and SBOM still read the committed
 checkout, so the SBOM names the project's own crates at `0.0.0`
-(a follow-up). Manifest-versioned releases through the merge lane
+(sbom-action #68). Manifest-versioned releases through the merge lane
 (Option B) come later; Model B keeps reading the release file's
 version.
 
@@ -619,8 +619,8 @@ dependencies included. The action also runs Cargo
 in the directory it scans, so when the job scans the workspace root a
 `.cargo/config.toml` under `path_prefix` doesn't apply: a member-local
 source replacement or patch can make the SBOM step fail after a
-build that succeeded. A working-directory input on sbom-action, a
-follow-up, fixes this. The SBOM never lists dev-dependencies (the
+build that succeeded. A working-directory input on sbom-action
+(#66, in review as #67) fixes this. The SBOM never lists dev-dependencies (the
 tool has no option for them);
 `sbom_include_dev: true` keeps build-dependencies, marked
 `scope: excluded`. The job keeps CycloneDX 1.5, the action's default
@@ -744,15 +744,15 @@ proposal.
 
 <!-- markdownlint-disable MD013 -->
 
-| Repository             | Item                                                                                                                | State                                                                    |
-| ---------------------- | ------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------ |
-| `rust-workflows`       | Lanes #4, #6 (epic #8)                                                                                              | Implemented; first release pending                                       |
-| `rust-workflows`       | Release lane #5                                                                                                     | Implemented; open until `test-rust-project` releases through it          |
-| `rust-workflows`       | Check `releases/` files at verify time (docker parity #36)                                                          | Open                                                                     |
-| `sbom-action`          | Describe the version a tag-versioned release stamps, rather than the `0.0.0` placeholder (Q7)                       | Open                                                                     |
-| `sbom-action`          | A Cargo working directory separate from the scanned manifest, so `path_prefix` keeps its `.cargo/config.toml` (Q13) | Open                                                                     |
-| `test-rust-project`    | Release through this repository's release lane (#5)                                                                 | After the first release of this repository                               |
-| `cbom-action`          | CBOM coverage for Rust (#10, closed)                                                                                | Parked until [CBOMkit](https://github.com/cbomkit/cbomkit) supports Rust |
-| `nexus-publish-action` | Nexus Cargo repositories for snapshots (#185)                                                                       | Not available on LF Nexus; snapshots stay artefacts (Q8)                 |
+| Repository             | Item                                                                                                                                 | State                                                                    |
+| ---------------------- | ------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------ |
+| `rust-workflows`       | Lanes #4, #6 (epic #8)                                                                                                               | Implemented; first release pending                                       |
+| `rust-workflows`       | Release lane #5                                                                                                                      | Implemented; open until `test-rust-project` releases through it          |
+| `rust-workflows`       | Check `releases/` files at verify time (docker parity #36)                                                                           | Open                                                                     |
+| `sbom-action`          | Describe the version a tag-versioned release stamps, rather than the `0.0.0` placeholder (Q7, sbom-action #68)                       | Open                                                                     |
+| `sbom-action`          | A Cargo working directory separate from the scanned manifest, so `path_prefix` keeps its `.cargo/config.toml` (Q13, sbom-action #66) | In review (sbom-action #67, after #65)                                   |
+| `test-rust-project`    | Release through this repository's release lane (#5)                                                                                  | After the first release of this repository                               |
+| `cbom-action`          | CBOM coverage for Rust (#10, closed)                                                                                                 | Parked until [CBOMkit](https://github.com/cbomkit/cbomkit) supports Rust |
+| `nexus-publish-action` | Nexus Cargo repositories for snapshots (#185)                                                                                        | Not available on LF Nexus; snapshots stay artefacts (Q8)                 |
 
 <!-- markdownlint-enable MD013 -->
