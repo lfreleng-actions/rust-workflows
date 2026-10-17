@@ -362,15 +362,26 @@ tag-validate -> rust-metadata -> build
   the assets it would have attached as a `release-assets` artefact
   instead. The self-test uses this mode.
 
-**Versioning (planned).** Today the release lane checks the tag
-against the version each publishable `Cargo.toml` declares. The
-maintainer chose tag-based versioning (Option A) as the next step: the
-tag supplies the version, and the manifests need not repeat it.
-`rust-build-action` v0.1.0 (#11) and `rust-crate-publish-action`
-v0.3.0 (#21) carry a `version` input for this, and a follow-up here
-adds a `version_source: manifest|tag` input to the release lane.
-Manifest versioning stays supported, and stays the default until that
-input lands.
+**Versioning.** The maintainer chose tag-based versioning (Option A)
+alongside the manifest versioning the lane started with, through
+`version_source`:
+
+- `manifest` (the default): the tag must equal the version each
+  publishable `Cargo.toml` declares.
+- `tag`: every workspace member keeps the placeholder `0.0.0`, and the
+  tag supplies the version. `rust-build-action` v0.1.0 (#11) and
+  `rust-crate-publish-action` v0.3.0 (#21) take it as `version` and
+  write it over the placeholder in `Cargo.toml` and `Cargo.lock`
+  before compiling, byte for byte alike, so the archive `build`
+  packages still equals the one `crate-verify` records. Each action
+  refuses a workspace member that doesn't carry `0.0.0`, and the
+  `build` job refuses a publishable one before compiling anything.
+
+Under `tag` the tests, audit and SBOM still read the committed
+checkout, so the SBOM names the project's own crates at `0.0.0`
+(a follow-up). Manifest-versioned releases through the merge lane
+(Option B) come later; Model B keeps reading the release file's
+version.
 
 ### Q8: Merge job graph (Model B)
 
@@ -733,15 +744,15 @@ proposal.
 
 <!-- markdownlint-disable MD013 -->
 
-| Repository             | Item                                                                                                                | State                                                                                    |
-| ---------------------- | ------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------- |
-| `rust-workflows`       | Lanes #4, #6 (epic #8)                                                                                              | Implemented; first release pending                                                       |
-| `rust-workflows`       | Release lane #5                                                                                                     | Implemented; open until `test-rust-project` releases through it                          |
-| `rust-workflows`       | Check `releases/` files at verify time (docker parity #36)                                                          | Open                                                                                     |
-| `rust-workflows`       | A `version_source` input (`manifest` or `tag`) on the release lane: tag-based versioning (Q7)                       | Unblocked: rust-build-action v0.1.0 and rust-crate-publish-action v0.3.0 carry `version` |
-| `sbom-action`          | A Cargo working directory separate from the scanned manifest, so `path_prefix` keeps its `.cargo/config.toml` (Q13) | Open                                                                                     |
-| `test-rust-project`    | Release through this repository's release lane (#5)                                                                 | After the first release of this repository                                               |
-| `cbom-action`          | CBOM coverage for Rust (#10, closed)                                                                                | Parked until [CBOMkit](https://github.com/cbomkit/cbomkit) supports Rust                 |
-| `nexus-publish-action` | Nexus Cargo repositories for snapshots (#185)                                                                       | Not available on LF Nexus; snapshots stay artefacts (Q8)                                 |
+| Repository             | Item                                                                                                                | State                                                                    |
+| ---------------------- | ------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------ |
+| `rust-workflows`       | Lanes #4, #6 (epic #8)                                                                                              | Implemented; first release pending                                       |
+| `rust-workflows`       | Release lane #5                                                                                                     | Implemented; open until `test-rust-project` releases through it          |
+| `rust-workflows`       | Check `releases/` files at verify time (docker parity #36)                                                          | Open                                                                     |
+| `sbom-action`          | Describe the version a tag-versioned release stamps, rather than the `0.0.0` placeholder (Q7)                       | Open                                                                     |
+| `sbom-action`          | A Cargo working directory separate from the scanned manifest, so `path_prefix` keeps its `.cargo/config.toml` (Q13) | Open                                                                     |
+| `test-rust-project`    | Release through this repository's release lane (#5)                                                                 | After the first release of this repository                               |
+| `cbom-action`          | CBOM coverage for Rust (#10, closed)                                                                                | Parked until [CBOMkit](https://github.com/cbomkit/cbomkit) supports Rust |
+| `nexus-publish-action` | Nexus Cargo repositories for snapshots (#185)                                                                       | Not available on LF Nexus; snapshots stay artefacts (Q8)                 |
 
 <!-- markdownlint-enable MD013 -->

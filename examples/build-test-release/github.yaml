@@ -73,6 +73,7 @@ jobs:
     #   attestations: true            # build provenance attestations
     #   sigstore_sign: true           # Sigstore bundles beside each asset
     #   semver_checks: false          # cargo-semver-checks before publish
+    #   version_source: 'manifest'    # 'tag': Cargo.toml keeps 0.0.0
     #   tag_enforce_increment: false  # tag must sort above earlier tags
     #   tag_require_branch: ''        # e.g. 'main'
     #   lockfile_required: true       # releases need Cargo.lock

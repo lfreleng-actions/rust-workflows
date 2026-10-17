@@ -14,9 +14,12 @@
 #
 # crate-verify dry-runs the publish: it checks the tag against every
 # crate version, compiles the packaged crates and records their
-# digests. attach-artefacts drafts the GitHub release and attaches the
-# crates (byte-identical to the verified ones), binaries, SBOMs and a
-# SHA256SUMS file, with provenance attestations and Sigstore bundles.
+# digests. With version_source 'tag', Cargo.toml keeps the
+# placeholder 0.0.0, and the build, crate-verify and publish each
+# write the tag's version over it first. attach-artefacts drafts the
+# GitHub release and attaches the crates (byte-identical to the
+# verified ones), binaries, SBOMs and a SHA256SUMS file, with
+# provenance attestations and Sigstore bundles.
 # publish, when enabled, uploads the verified crates to crates.io
 # through Trusted Publishing. promote-release publishes the draft last,
 # so a failed upload leaves a draft rather than a release without its
@@ -333,6 +336,16 @@ on:
         required: false
         type: boolean
         default: true
+      version_source:
+        description: >-
+          Where the release version comes from. 'manifest': every
+          publishable Cargo.toml already carries the tag's version.
+          'tag': every workspace member keeps the placeholder 0.0.0 in
+          Cargo.toml, and the build, crate verification and publish
+          write the tag's version into their checkouts first
+        required: false
+        type: string
+        default: 'manifest'
       semver_checks:
         description: >-
           Run cargo-semver-checks against the latest earlier crates.io
@@ -490,6 +503,7 @@ jobs:
           GRYPE_FAIL_ON: ${{ inputs.grype_fail_on }}
           GRYPE_DEPENDENCY_POLICY: ${{ inputs.grype_dependency_policy }}
           GRYPE_TRANSITIVE_FAIL_ON: ${{ inputs.grype_transitive_fail_on }}
+          VERSION_SOURCE: ${{ inputs.version_source }}
           DRY_RUN: ${{ inputs.dry_run }}
           TAG: ${{ inputs.tag }}
           REF_TYPE: ${{ github.ref_type }}
@@ -516,6 +530,7 @@ jobs:
             'all declared'
           check grype_transitive_fail_on "$GRYPE_TRANSITIVE_FAIL_ON" \
             'negligible low medium high critical none'
+          check version_source "$VERSION_SOURCE" 'manifest tag'
           if [ "$DRY_RUN" = 'true' ]; then
             [ -n "$TAG" ] || error "dry_run needs the tag input"
           else
@@ -606,6 +621,9 @@ jobs:
     outputs:
       tag: ${{ steps.tag-validate.outputs.tag_name }}
       sha: ${{ steps.commit.outputs.sha }}
+      # The version the actions write over the 0.0.0 placeholder;
+      # empty unless version_source is 'tag'
+      stamp: ${{ steps.commit.outputs.stamp }}
     steps:
       - name: 'Load egress allow-list'
         # yamllint disable-line rule:line-length
@@ -660,6 +678,7 @@ jobs:
         env:
           TAG: ${{ steps.tag-validate.outputs.tag_name }}
           REF: ${{ inputs.ref }}
+          VERSION_SOURCE: ${{ inputs.version_source }}
         run: |
           # Resolve the tagged commit
           set -euo pipefail
@@ -670,6 +689,9 @@ jobs:
             exit 1
           fi
           echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          if [ "$VERSION_SOURCE" = 'tag' ]; then
+            echo "stamp=${TAG#v}" >> "$GITHUB_OUTPUT"
+          fi
           echo "Releasing $TAG from $sha"
 
       # Immutable releases cannot gain assets once published, so a
@@ -733,27 +755,44 @@ jobs:
       contents: read
     timeout-minutes: ${{ inputs.build_timeout_minutes }}
     steps:
-      # Fail before compiling anything when the tag names a version the
-      # crates do not carry; crate-verify repeats the check in full.
+      # Fail before compiling anything when the crates do not carry the
+      # version the release expects: the tag's own under 'manifest', the
+      # 0.0.0 placeholder under 'tag'. crate-verify repeats the check in
+      # full, and under 'tag' the actions check every workspace member.
       - name: 'Check the tag against the crate versions'
         shell: bash
         env:
           TAG: ${{ needs.tag-validate.outputs.tag }}
+          STAMP: ${{ needs.tag-validate.outputs.stamp }}
           # yamllint disable-line rule:line-length
           PUBLISHABLE: ${{ needs.rust-metadata.outputs.publishable_packages }}
         run: |
           # Check the tag against the crate versions
           set -euo pipefail
-          version="${TAG#v}"
+          if [ -n "$STAMP" ]; then
+            version='0.0.0'
+          else
+            version="${TAG#v}"
+          fi
           mismatched="$(jq -r --arg v "$version" \
             '[.[] | select(.version != $v) | .name + " " + .version]
              | join(", ")' <<< "$PUBLISHABLE")"
           if [ -n "$mismatched" ]; then
-            echo "::error::Tag $TAG does not match: $mismatched." \
-              "Tag the commit that sets version $version."
+            if [ -n "$STAMP" ]; then
+              echo "::error::version_source is 'tag', so every" \
+                "publishable crate must carry the placeholder version" \
+                "0.0.0 in Cargo.toml: $mismatched."
+            else
+              echo "::error::Tag $TAG does not match: $mismatched." \
+                "Tag the commit that sets version $version."
+            fi
             exit 1
           fi
-          echo "Tag $TAG matches every publishable crate ✅"
+          if [ -n "$STAMP" ]; then
+            echo "Every publishable crate carries 0.0.0; releasing $STAMP ✅"
+          else
+            echo "Tag $TAG matches every publishable crate ✅"
+          fi
 
       - name: 'Load egress allow-list'
         # yamllint disable-line rule:line-length
@@ -826,6 +865,7 @@ jobs:
           cargo_args: ${{ inputs.cargo_args }}
           binaries: ${{ inputs.binaries }}
           auditable: ${{ inputs.auditable }}
+          version: ${{ needs.tag-validate.outputs.stamp }}
           # yamllint disable-line rule:line-length
           package_crates: ${{ strategy.job-index == 0 && needs.rust-metadata.outputs.publishable_count != '0' }}
           # yamllint disable-line rule:line-length
@@ -1386,6 +1426,7 @@ jobs:
           exclude: ${{ inputs.exclude }}
           toolchain: ${{ needs.rust-metadata.outputs.toolchain }}
           release_tag: ${{ needs.tag-validate.outputs.tag }}
+          version: ${{ needs.tag-validate.outputs.stamp }}
           semver_checks: ${{ inputs.semver_checks }}
           dry_run: 'true'
 
@@ -1475,6 +1516,7 @@ jobs:
           PUBLISHABLE: ${{ needs.rust-metadata.outputs.publishable_packages }}
           CRATE_NAMES: ${{ needs.crate-verify.outputs.crate_name }}
           CRATE_SHA256: ${{ needs.crate-verify.outputs.crate_sha256 }}
+          STAMP: ${{ needs.tag-validate.outputs.stamp }}
         run: |
           # Collect release assets
           set -euo pipefail
@@ -1506,7 +1548,8 @@ jobs:
           # trusted: each asset must be a regular file directly in its
           # artefact, and each crate's own bytes must hash to the digest
           # crate-verify recorded. Names and versions come from
-          # crate-verify and rust-metadata, never from the artefact.
+          # crate-verify and rust-metadata, or the validated tag under
+          # version_source 'tag', never from the artefact.
           regular() {
             local path="$1" dir="$2" real
             [ -f "$path" ] && [ ! -L "$path" ] || return 1
@@ -1528,8 +1571,12 @@ jobs:
             for name in $CRATE_NAMES; do
               [[ "$name" =~ ^[A-Za-z0-9_-]+$ ]] \
                 || fail "crate-verify reported an invalid crate name"
-              version="$(jq -r --arg n "$name" \
-                '.[] | select(.name == $n) | .version' <<< "$PUBLISHABLE")"
+              if [ -n "$STAMP" ]; then
+                version="$STAMP"
+              else
+                version="$(jq -r --arg n "$name" \
+                  '.[] | select(.name == $n) | .version' <<< "$PUBLISHABLE")"
+              fi
               [[ "$version" =~ ^[0-9A-Za-z.+-]+$ ]] \
                 || fail "$name: no version in the project metadata"
               want="$(jq -r --arg n "$name" '.[$n] // empty' \
@@ -1743,6 +1790,7 @@ jobs:
           # so publish with the toolchain crate-verify used.
           toolchain: ${{ needs.rust-metadata.outputs.toolchain }}
           release_tag: ${{ needs.tag-validate.outputs.tag }}
+          version: ${{ needs.tag-validate.outputs.stamp }}
           registry_token: ${{ steps.auth.outputs.token }}
           expected_sha256: ${{ needs.crate-verify.outputs.crate_sha256 }}
 

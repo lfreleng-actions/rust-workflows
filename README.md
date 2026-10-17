@@ -110,29 +110,30 @@ workflow. The defaults gate; the inputs below relax them.
 
 <!-- markdownlint-disable MD013 -->
 
-| Input                                         | Lanes          | Default  | Effect                                                                                                                                          |
-| --------------------------------------------- | -------------- | -------- | ----------------------------------------------------------------------------------------------------------------------------------------------- |
-| `tests_enabled`                               | all            | `true`   | `false` skips the test jobs                                                                                                                     |
-| `test_permit_fail`                            | all            | `false`  | Report test failures without failing the job                                                                                                    |
-| `audit_enabled`                               | all            | `true`   | `false` skips `cargo audit`                                                                                                                     |
-| `audit_permit_fail`                           | all            | `false`  | Report audit failures without failing the job                                                                                                   |
-| `audit_ignore_vulns`, `audit_allow_list_path` | all            | `''`     | RUSTSEC advisories to ignore                                                                                                                    |
-| `deny_enabled`, `deny_checks`                 | all            | `false`  | Also run `cargo deny` checks                                                                                                                    |
-| `sbom_enabled`                                | all            | `true`   | `false` skips the SBOM, and with it the Grype scan                                                                                              |
-| `sbom_include_dev`                            | all            | `false`  | Include Cargo build-dependencies in the SBOM, marked `scope: excluded`; dev-dependencies stay out                                               |
-| `grype_enabled`                               | all            | `true`   | `false` skips the Grype scan but keeps the SBOM                                                                                                 |
-| `grype_fail_on`                               | all            | `medium` | Lowest severity that fails the scan; `none` reports without gating                                                                              |
-| `grype_permit_fail`                           | all            | `false`  | Report Grype findings without failing the job                                                                                                   |
-| `grype_only_fixed`                            | all            | `false`  | Ignore advisories that have no fix                                                                                                              |
-| `grype_dependency_policy`                     | all            | `all`    | `declared` gates the crates the project declares and reports inherited ones as warnings                                                         |
-| `grype_transitive_fail_on`                    | all            | `none`   | Under `declared`, the lowest severity at which an inherited crate still gates                                                                   |
-| `grype_gate_when`                             | verify         | `always` | `dependencies-changed` gates when the change touches `Cargo.toml`, `Cargo.lock` or `.cargo/config*`, and otherwise reports findings as warnings |
-| `grype_cache_db`                              | verify         | `true`   | Grype database cache: `true`, `false`, or restore without saving                                                                                |
-| `cbom_enabled`                                | verify         | `false`  | Advisory CBOM job; see [CBOM](#cbom)                                                                                                            |
-| `cache`                                       | verify         | `false`  | Cache `~/.cargo` and `target/`; the release and merge lanes never restore a cache                                                               |
-| `publish_enabled`                             | release, merge | `false`  | Publish to crates.io through Trusted Publishing                                                                                                 |
-| `dry_run`                                     | release, merge | `false`  | Verify everything, publish and tag nothing                                                                                                      |
-| `harden_runner_egress`                        | all            | `block`  | `audit` logs egress instead of blocking it                                                                                                      |
+| Input                                         | Lanes          | Default    | Effect                                                                                                                                          |
+| --------------------------------------------- | -------------- | ---------- | ----------------------------------------------------------------------------------------------------------------------------------------------- |
+| `tests_enabled`                               | all            | `true`     | `false` skips the test jobs                                                                                                                     |
+| `test_permit_fail`                            | all            | `false`    | Report test failures without failing the job                                                                                                    |
+| `audit_enabled`                               | all            | `true`     | `false` skips `cargo audit`                                                                                                                     |
+| `audit_permit_fail`                           | all            | `false`    | Report audit failures without failing the job                                                                                                   |
+| `audit_ignore_vulns`, `audit_allow_list_path` | all            | `''`       | RUSTSEC advisories to ignore                                                                                                                    |
+| `deny_enabled`, `deny_checks`                 | all            | `false`    | Also run `cargo deny` checks                                                                                                                    |
+| `sbom_enabled`                                | all            | `true`     | `false` skips the SBOM, and with it the Grype scan                                                                                              |
+| `sbom_include_dev`                            | all            | `false`    | Include Cargo build-dependencies in the SBOM, marked `scope: excluded`; dev-dependencies stay out                                               |
+| `grype_enabled`                               | all            | `true`     | `false` skips the Grype scan but keeps the SBOM                                                                                                 |
+| `grype_fail_on`                               | all            | `medium`   | Lowest severity that fails the scan; `none` reports without gating                                                                              |
+| `grype_permit_fail`                           | all            | `false`    | Report Grype findings without failing the job                                                                                                   |
+| `grype_only_fixed`                            | all            | `false`    | Ignore advisories that have no fix                                                                                                              |
+| `grype_dependency_policy`                     | all            | `all`      | `declared` gates the crates the project declares and reports inherited ones as warnings                                                         |
+| `grype_transitive_fail_on`                    | all            | `none`     | Under `declared`, the lowest severity at which an inherited crate still gates                                                                   |
+| `grype_gate_when`                             | verify         | `always`   | `dependencies-changed` gates when the change touches `Cargo.toml`, `Cargo.lock` or `.cargo/config*`, and otherwise reports findings as warnings |
+| `grype_cache_db`                              | verify         | `true`     | Grype database cache: `true`, `false`, or restore without saving                                                                                |
+| `cbom_enabled`                                | verify         | `false`    | Advisory CBOM job; see [CBOM](#cbom)                                                                                                            |
+| `cache`                                       | verify         | `false`    | Cache `~/.cargo` and `target/`; the release and merge lanes never restore a cache                                                               |
+| `publish_enabled`                             | release, merge | `false`    | Publish to crates.io through Trusted Publishing                                                                                                 |
+| `version_source`                              | release        | `manifest` | `tag`: the tag sets the version, and `Cargo.toml` keeps `0.0.0` (see "Model A versions")                                                        |
+| `dry_run`                                     | release, merge | `false`    | Verify everything, publish and tag nothing                                                                                                      |
+| `harden_runner_egress`                        | all            | `block`    | `audit` logs egress instead of blocking it                                                                                                      |
 
 <!-- markdownlint-enable MD013 -->
 
@@ -200,6 +201,28 @@ rather than a release without its crates.
 
 Keep one workflow per tag push: remove the `release.yaml` that
 `actions-template` ships when a project adopts the release lane.
+
+### Model A versions
+
+The release tag names the version; `version_source` decides where the
+crates carry it.
+
+- `manifest` (the default): every publishable `Cargo.toml` already
+  holds the tag's version, and the lane fails before compiling when
+  one doesn't. Bump the manifests, merge, then tag.
+- `tag`: every workspace member keeps the placeholder `0.0.0` in
+  `Cargo.toml` and `Cargo.lock`, and tagging `v1.2.3` releases 1.2.3.
+  The build, `crate-verify` and `publish` each write the version over
+  the placeholder in their own checkout before compiling, through the
+  `version` input of rust-build-action and rust-crate-publish-action,
+  which rewrite the files identically, so the archives still match.
+  Binaries embed the release version. The lane fails before compiling
+  when a publishable crate carries anything but `0.0.0`.
+
+  The tests, audit and SBOM read the checkout as committed: a test of
+  `CARGO_PKG_VERSION` sees `0.0.0`, and the SBOM names the project's
+  own crates at `0.0.0`. The third-party dependencies that the audit
+  and Grype check are the same either way.
 
 ### Model B release files
 
