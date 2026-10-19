@@ -3,20 +3,26 @@
 # SPDX-FileCopyrightText: 2026 The Linux Foundation
 
 # =============================================================================
-# EXAMPLE: Plain GitHub-native caller for the reusable merge workflow
+# EXAMPLE: Plain GitHub-native caller for the Rust merge lane (Model B)
 # =============================================================================
-# Model B (merge-driven snapshots + releases/ file-triggered releases) is
-# PRIMARILY a Gerrit pattern, generalising the Jenkins-heritage LF flow —
-# see gerrit.yaml in this directory for the canonical caller. This
-# GitHub-native variant serves projects that adopt the same model on a
-# plain GitHub repository: every push (merge) to a main branch publishes
-# a snapshot, and a merged release file under releases/ triggers a
-# release publish.
+# This is Model B: the MERGE-DRIVEN release model. Every merge builds,
+# tests, audits and scans the merged commit and dry-runs the crates.io
+# publish; the packaged crates stay a workflow artefact, as crates.io has
+# no snapshots. A release happens when the merged commit adds one file
+# under releases/ holding a line 'version: X.Y.Z' that equals every
+# published crate's version. The lane then publishes to crates.io (with
+# publish_enabled) and tags the merged commit v<version>.
 #
 # Copy this file into your project's .github/workflows/ directory (for
 # example as merge.yaml) and adjust the `uses:` ref to suit your project.
+#
+# CRATES.IO TRUSTED PUBLISHING. The publish job runs from the branch
+# commit, before any tag exists, so restrict the publish environment to
+# the protected branch, and register this file and that environment as a
+# crates.io trusted publisher. A project also running the release lane
+# (Model A) uses a second environment and publisher entry.
 # =============================================================================
-name: 'Merge/Publish'
+name: 'Merge'
 
 # yamllint disable-line rule:truthy
 on:
@@ -25,26 +31,35 @@ on:
       - main
       - master
 
+# Never cancel a merge run: a cancelled release could stop between the
+# crates.io upload and the tag. 'queue: max' keeps every pending run
+# too, where a plain group would replace a waiting run, and with it a
+# release file that later runs no longer see as new.
 concurrency:
   group: "${{ github.workflow }}-${{ github.ref }}"
   cancel-in-progress: false
+  queue: max
 
 permissions: {}
 
 jobs:
   merge:
-    name: 'Merge/Publish'
+    name: 'Merge'
     permissions:
-      contents: read
-    # REPLACE the pinned SHA below with a workflows-template release SHA
-    # (or your instantiated workflows repository's release SHA).
+      contents: write       # Tag the merged commit after a release
+      id-token: write       # crates.io Trusted Publishing
+      pull-requests: read   # repository-metadata-action queries PR data
+      issues: read          # grype-scan-action reads cve-bypass issues
+    # REPLACE the pinned SHA below with a rust-workflows release SHA.
     # The all-zero SHA is a non-functional placeholder, NOT a real commit.
     # yamllint disable-line rule:line-length
-    uses: lfreleng-actions/workflows-template/.github/workflows/merge.yaml@0000000000000000000000000000000000000000  # REPLACE: vX.Y.Z
+    uses: lfreleng-actions/rust-workflows/.github/workflows/merge.yaml@0000000000000000000000000000000000000000  # REPLACE: vX.Y.Z
     # All inputs are optional; uncomment to tune.
     # with:
-    #   path_prefix: '.'              # project root (monorepo subdir, etc.)
+    #   publish_enabled: true         # after registering the publisher
+    #   publish_environment: 'production-merge'
+    #   create_tag: true              # tag v<version> after publishing
+    #   semver_checks: false          # cargo-semver-checks on releases
+    #   dry_run: false                # verify a release, publish nothing
+    #   grype_permit_fail: false      # true reports without failing
     #   harden_runner_egress: 'block' # 'block' (default) or 'audit'
-    secrets:
-      OP_SERVICE_ACCOUNT_TOKEN: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN }}
-      VAULT_MAPPING_JSON: ${{ secrets.VAULT_MAPPING_JSON }}
