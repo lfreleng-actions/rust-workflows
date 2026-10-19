@@ -623,14 +623,22 @@ package it scans that manifest's directory. The job forwards
 `features`, `all_features` and `no_default_features` as sbom-action's
 `cargo_features`, `cargo_all_features` and `cargo_no_default_features`
 (v0.5.0), so the SBOM describes the graph the build compiled, optional
-dependencies included. The action also runs Cargo
-in the directory it scans, so when the job scans the workspace root a
-`.cargo/config.toml` under `path_prefix` doesn't apply: a member-local
-source replacement or patch can make the SBOM step fail after a
-build that succeeded. A working-directory input on sbom-action
-(#66, in review as #67) fixes this. The SBOM never lists dev-dependencies (the
-tool has no option for them);
-`sbom_include_dev: true` keeps build-dependencies, marked
+dependencies included.
+
+Cargo reads `.cargo/config.toml` from its working directory upwards,
+and the build runs it in `path_prefix`. When `path_prefix` lies
+beneath the directory the SBOM describes (a member, with the lane
+acting on the whole workspace), the job passes it as sbom-action's
+`cargo_working_directory` (v0.7.0), so a member-local source
+replacement or `[patch]` applies to the SBOM as it did to the build.
+Otherwise Cargo runs in the described directory, which then lies in
+`path_prefix`. Its upward search reaches `path_prefix` and anything
+above, but can also read a configuration between the two that the
+build never reads. sbom-action refuses a working directory above the
+directory it describes, so the job cannot run Cargo higher.
+
+The SBOM never lists dev-dependencies (the tool has no option for
+them); `sbom_include_dev: true` keeps build-dependencies, marked
 `scope: excluded`. The job keeps CycloneDX 1.5, the action's default
 and the newest `cargo-cyclonedx` writes. The `syft` backend it replaces
 read `Cargo.lock`, listing every locked crate, including those that
@@ -758,7 +766,6 @@ proposal.
 | `rust-workflows`               | Release lane #5                                                                                                                      | Implemented; open until `test-rust-project` releases through it          |
 | `rust-workflows`               | Check `releases/` files at verify time (docker parity #36)                                                                           | Open                                                                     |
 | `sbom-action`                  | Describe the version a tag-versioned release stamps, rather than the `0.0.0` placeholder (Q7, sbom-action #68)                       | Open                                                                     |
-| `sbom-action`                  | A Cargo working directory separate from the scanned manifest, so `path_prefix` keeps its `.cargo/config.toml` (Q13, sbom-action #66) | In review (sbom-action #67, after #65)                                   |
 | `test-rust-project`            | Release through this repository's release lane (#5)                                                                                  | After the first release of this repository                               |
 | `cbom-action`                  | CBOM coverage for Rust (#10, closed)                                                                                                 | Parked until [CBOMkit](https://github.com/cbomkit/cbomkit) supports Rust |
 | `nexus-publish-action`         | Nexus Cargo repositories for snapshots (#185)                                                                                        | Not available on LF Nexus; snapshots stay artefacts (Q8)                 |

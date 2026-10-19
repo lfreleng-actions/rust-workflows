@@ -930,6 +930,42 @@ jobs:
       # skips, losing the SBOM. That guard buys nothing here: the build
       # job has already compiled this same checkout with the same
       # read-only token.
+      # The SBOM describes the workspace root when the lane acts on more
+      # than one member (workspace, or named packages), so it covers
+      # everything the build does, and the selected manifest's own
+      # directory for a single package. Cargo reads .cargo/config.toml
+      # from its working directory upwards, and the build runs it in
+      # path_prefix, so the SBOM's Cargo runs there too whenever
+      # path_prefix lies beneath the described directory. Otherwise
+      # Cargo runs in the described directory, which then lies in
+      # path_prefix, and its upward search still reaches path_prefix.
+      - name: 'Choose the SBOM directories'
+        id: dirs
+        shell: bash
+        env:
+          PATH_PREFIX: ${{ inputs.path_prefix }}
+          # yamllint disable-line rule:line-length
+          SCAN_DIR: ${{ (inputs.workspace || inputs.packages != '') && needs.rust-metadata.outputs.lockfile_dir || needs.rust-metadata.outputs.manifest_dir }}
+        run: |
+          # Choose the SBOM directories
+          set -euo pipefail
+          case "$PATH_PREFIX$SCAN_DIR" in
+            *$'\n'* | *$'\r'*)
+              echo "::error::path_prefix holds a line break"
+              exit 1 ;;
+          esac
+          scan="$(realpath -e -- "$GITHUB_WORKSPACE/$SCAN_DIR")"
+          prefix="$(realpath -e -- "$GITHUB_WORKSPACE/$PATH_PREFIX")"
+          cargo_dir=''
+          case "$prefix" in
+            "$scan"/*) cargo_dir="$PATH_PREFIX" ;;
+          esac
+          {
+            echo "scan=$SCAN_DIR"
+            echo "cargo_dir=$cargo_dir"
+          } >> "$GITHUB_OUTPUT"
+          echo "SBOM of $SCAN_DIR, Cargo run from ${cargo_dir:-$SCAN_DIR}"
+
       - name: 'Generate SBOM'
         id: sbom
         # yamllint disable-line rule:line-length
@@ -941,13 +977,8 @@ jobs:
           # Named rather than left to 'auto', so the lane states the
           # build tool instead of inferring it.
           dependency_manager: 'cargo'
-          # The whole workspace when the lane acts on more than one
-          # member (workspace, or named packages), so the SBOM covers
-          # everything the build does; the selected manifest's own
-          # directory for a single package. Either directory holds the
-          # Cargo.toml the action needs.
-          # yamllint disable-line rule:line-length
-          path_prefix: ${{ (inputs.workspace || inputs.packages != '') && needs.rust-metadata.outputs.lockfile_dir || needs.rust-metadata.outputs.manifest_dir }}
+          path_prefix: ${{ steps.dirs.outputs.scan }}
+          cargo_working_directory: ${{ steps.dirs.outputs.cargo_dir }}
           # The build's feature selection, so the SBOM describes the
           # graph the build compiled rather than the default features.
           cargo_features: ${{ inputs.features }}

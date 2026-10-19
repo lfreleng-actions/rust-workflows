@@ -164,6 +164,7 @@ jobs:
           # cover scanning.
           - name: 'root'
             path_prefix: '.'
+            workspace: false
             # yamllint disable-line rule:line-length
             runners: '[{"runner": "ubuntu-latest", "arch": "x64"}, {"runner": "ubuntu-24.04-arm", "arch": "arm64"}]'
             test_matrix: 'msrv'
@@ -178,6 +179,7 @@ jobs:
           # A virtual workspace with a publish = false member.
           - name: 'workspace'
             path_prefix: 'variants/workspace'
+            workspace: false
             runners: '[{"runner": "ubuntu-latest", "arch": "x64"}]'
             test_matrix: 'msrv'
             test_runner: 'cargo'
@@ -188,10 +190,27 @@ jobs:
             lockfile_required: true
             cbom_enabled: false
             grype_gate_when: 'always'
+          # A member as path_prefix, acting on the whole workspace: the
+          # SBOM describes the workspace root while its Cargo runs in
+          # the member, where the build runs it.
+          - name: 'workspace-member'
+            path_prefix: 'variants/workspace/cli'
+            workspace: true
+            runners: '[{"runner": "ubuntu-latest", "arch": "x64"}]'
+            test_matrix: 'project'
+            test_runner: 'cargo'
+            coverage: false
+            binaries: false
+            features: ''
+            setup_script: ''
+            lockfile_required: true
+            cbom_enabled: false
+            grype_gate_when: 'always'
           # No committed Cargo.lock: rust-metadata resolves one and
           # every job restores it.
           - name: 'no-lockfile'
             path_prefix: 'variants/no-lockfile'
+            workspace: false
             runners: '[{"runner": "ubuntu-latest", "arch": "x64"}]'
             test_matrix: 'project'
             test_runner: 'cargo'
@@ -206,6 +225,7 @@ jobs:
           # under nextest so every leg leaves a JUnit report to check.
           - name: 'msrv'
             path_prefix: 'variants/msrv'
+            workspace: false
             runners: '[{"runner": "ubuntu-latest", "arch": "x64"}]'
             test_matrix: 'full'
             test_runner: 'nextest'
@@ -219,6 +239,7 @@ jobs:
           # A real crates.io dependency for the audit, SBOM and Grype.
           - name: 'dependencies'
             path_prefix: 'variants/dependencies'
+            workspace: false
             runners: '[{"runner": "ubuntu-latest", "arch": "x64"}]'
             test_matrix: 'project'
             test_runner: 'cargo'
@@ -232,6 +253,7 @@ jobs:
           # A native library installed by setup_script.
           - name: 'native'
             path_prefix: 'variants/native'
+            workspace: false
             runners: '[{"runner": "ubuntu-latest", "arch": "x64"}]'
             test_matrix: 'project'
             test_runner: 'cargo'
@@ -245,6 +267,7 @@ jobs:
           # A non-default feature selection.
           - name: 'features'
             path_prefix: 'variants/features'
+            workspace: false
             runners: '[{"runner": "ubuntu-latest", "arch": "x64"}]'
             test_matrix: 'project'
             test_runner: 'cargo'
@@ -264,6 +287,7 @@ jobs:
       repository: 'lfreleng-actions/test-rust-project'
       ref: 'df3d10b10c86d57e323f1042e246417baf684e7f'
       path_prefix: ${{ matrix.path_prefix }}
+      workspace: ${{ matrix.workspace }}
       runners: ${{ matrix.runners }}
       test_matrix: ${{ matrix.test_matrix }}
       test_runner: ${{ matrix.test_runner }}
@@ -433,6 +457,23 @@ jobs:
             pass 'The dependencies SBOM lists the semver crate'
           else
             miss 'The dependencies SBOM lacks the semver crate'
+          fi
+          # A member as path_prefix with workspace: true describes every
+          # workspace member, not the member alone: one merged document
+          # with each member a top-level component, where a single
+          # member's own SBOM would name it in metadata.component.
+          long='name-too-long-for-crates-io-by-design'
+          if jq -e --arg cli "lfreleng-fixture-workspace-cli-$long" \
+            --arg core "lfreleng-fixture-workspace-core-$long" \
+            '[.components[]?.name] as $n
+             | .metadata.component.name != $cli
+               and ($n | index($cli)) != null
+               and ($n | index($core)) != null' \
+            "$DIR/sbom-files-workspace-member/sbom-cyclonedx.json" \
+            > /dev/null; then
+            pass 'The workspace-member SBOM describes the whole workspace'
+          else
+            miss 'The workspace-member SBOM misses a workspace member'
           fi
           if [ -f "$DIR/sbom-files-root/dependency-change.json" ]; then
             pass 'The SBOM job recorded whether dependencies changed'
