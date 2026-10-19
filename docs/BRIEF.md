@@ -297,7 +297,9 @@ rust-metadata -> build -> { tests | audit | sbom -> grype | cbom }
 - The `sbom` job records whether the change touched `Cargo.toml`,
   `Cargo.lock` or Cargo configuration, comparing the commit under test
   with its first parent, in a `dependency-change.json` sidecar beside
-  the SBOM. With `grype_gate_when: dependencies-changed`, Grype gates
+  the SBOM. It reads paths NUL-delimited, so a name Git would quote
+  still matches, and without rename detection, so a manifest moved
+  away counts too. With `grype_gate_when: dependencies-changed`, Grype gates
   when that answer is yes, treats a missing answer as yes, and
   otherwise reports its findings as warnings.
 - `cbom` is advisory (Q13).
@@ -448,7 +450,13 @@ resolve-commit -> check-release -> rust-metadata -> build
   covers, so a failed build must stop the release.
 - The `tag` job creates a lightweight tag through the GitHub API with
   `GITHUB_TOKEN`, so the tag starts no other workflow. It's idempotent
-  on a re-run and fails rather than move a tag on another commit. No
+  on a re-run and fails rather than move a tag on another commit.
+  `check-release` makes the same check before anything builds or
+  publishes, because a crates.io version is permanent: an earlier run
+  may have tagged the version without publishing it, and the lane
+  must not then publish other source under it. A dry run reports the
+  conflict as a warning. A lookup error other than "not found" stops
+  the run rather than assume the tag is free. No
   sibling lane tags yet, and signed tags remain a release-engineering
   decision (docker-workflows #110), so Gerrit projects set
   `create_tag: false` and tag in Gerrit, which replicates to the

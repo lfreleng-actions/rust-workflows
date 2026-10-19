@@ -802,7 +802,9 @@ jobs:
           fail() { echo "::error::$*"; exit 1; }
           sha="$(git rev-parse HEAD)"
           echo "sha=$sha" >> "$GITHUB_OUTPUT"
-          # Release files are YAML files directly under releases/.
+          # Release files are YAML files directly under releases/. Paths
+          # are read NUL-delimited: git would otherwise quote one holding
+          # a space, a quote or a non-ASCII byte.
           markers=(':(glob)releases/*.yaml' ':(glob)releases/*.yml')
           if [[ "$BEFORE" =~ ^[0-9a-f]{40}$ ]] \
             && [[ "$BEFORE" =~ [1-9a-f] ]] \
@@ -810,8 +812,8 @@ jobs:
           then
             # Every commit this push added, so a release file in an
             # earlier commit of a batched push still counts.
-            mapfile -t files < <(git diff --diff-filter=A --name-only \
-              "$BEFORE" HEAD -- "${markers[@]}")
+            mapfile -d '' -t files < <(git diff -z --diff-filter=A \
+              --name-only "$BEFORE" HEAD -- "${markers[@]}")
           else
             if [ -n "$BEFORE" ]; then
               echo "::notice::The push replaced or created the branch;" \
@@ -826,7 +828,7 @@ jobs:
               fi
               root=(--root)
             fi
-            mapfile -t files < <(git diff-tree -m --first-parent \
+            mapfile -d '' -t files < <(git diff-tree -z -m --first-parent \
               --diff-filter=A --no-commit-id -r --name-only \
               ${root[@]+"${root[@]}"} HEAD -- "${markers[@]}")
           fi
@@ -873,6 +875,53 @@ jobs:
           } >> "$GITHUB_OUTPUT"
           echo "## 🦀 Release $version requested by \`$file\`" \
             >> "$GITHUB_STEP_SUMMARY"
+
+      # A crates.io version is permanent, so a release tag that already
+      # names other source stops the run here, before anything builds
+      # or publishes: an earlier run may have tagged the version
+      # without publishing it. The tag job repeats the check for races.
+      # A dry run publishes and tags nothing, so it reports the
+      # conflict as a warning and carries on rehearsing.
+      - name: 'Check the release tag'
+        if: steps.detect.outputs.has_release == 'true'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPOSITORY: ${{ inputs.repository || github.repository }}
+          TAG: v${{ steps.detect.outputs.version }}
+          SHA: ${{ steps.detect.outputs.sha }}
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          # Check the release tag
+          set -euo pipefail
+          errors="$RUNNER_TEMP/tag-lookup.err"
+          stop() {
+            if [ "$DRY_RUN" = 'true' ]; then
+              echo "::warning::$*; a real run would stop here"
+              exit 0
+            fi
+            echo "::error::$*"
+            exit 1
+          }
+          if existing="$(gh api "repos/$REPOSITORY/git/ref/tags/$TAG" \
+              --jq '.object.type + " " + .object.sha' 2> "$errors")"; then
+            target="${existing#* }"
+            if [ "${existing%% *}" = 'tag' ]; then
+              target="$(gh api "repos/$REPOSITORY/git/tags/$target" \
+                --jq .object.sha)"
+            fi
+            if [ "$target" != "$SHA" ]; then
+              stop "$TAG already exists on $target, not $SHA." \
+                "Release a new version"
+            fi
+            echo "$TAG already names $SHA ✅"
+          elif grep -q 'HTTP 404' "$errors"; then
+            echo "$TAG is free ✅"
+          else
+            # Anything but 'not found' leaves the tag unknown: stop
+            # rather than publish past a tag that may exist.
+            stop "Could not look up $TAG: $(head -c 300 "$errors")"
+          fi
 
   build:
     name: 'Build (${{ matrix.platform.arch }})'

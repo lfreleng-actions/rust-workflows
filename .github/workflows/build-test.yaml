@@ -973,14 +973,17 @@ jobs:
             exit 0
           fi
           changed=false
-          while IFS= read -r file; do
+          # NUL-delimited: git quotes a path holding a space, a quote or
+          # a non-ASCII byte, which would never match below. No rename
+          # detection, so a manifest moved away counts at its old path.
+          while IFS= read -r -d '' file; do
             case "$file" in
               Cargo.toml | */Cargo.toml | Cargo.lock | */Cargo.lock \
                 | .cargo/config | .cargo/config.toml \
                 | */.cargo/config | */.cargo/config.toml)
                 changed=true ;;
             esac
-          done < <(git diff --name-only 'HEAD^1' HEAD)
+          done < <(git diff -z --no-renames --name-only 'HEAD^1' HEAD)
           printf '{"changed": %s}\n' "$changed" \
             > "$SBOM_DIR/dependency-change.json"
           echo "Dependencies changed: $changed"

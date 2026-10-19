@@ -70,7 +70,7 @@ jobs:
         shell: bash
         run: |
           # Every checkout in a reusable workflow names a repository
-          python3 - <<'GUARD'
+          python3 -I - <<'GUARD'
           import pathlib, re, sys
 
           CHECKOUT = re.compile(

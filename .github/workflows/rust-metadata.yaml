@@ -304,7 +304,10 @@ jobs:
         run: |
           # Read an inherited rust-version
           set -euo pipefail
-          python3 - <<'PY'
+          # Isolated mode: the working directory is the checkout, and
+          # 'python3 -' would import a tomllib.py found there ahead of
+          # the standard library, with this step's output files.
+          python3 -I - <<'PY'
           import os
           import re
           import sys
