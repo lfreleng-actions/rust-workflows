@@ -762,13 +762,13 @@ proposal.
 
 <!-- markdownlint-disable MD013 -->
 
-| Repository                     | Item                                                                                                                                 | State                                                                    |
-| ------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------ |
-| `rust-workflows`               | Lanes #4, #6 (epic #8)                                                                                                               | Implemented; first release pending                                       |
-| `rust-workflows`               | Release lane #5                                                                                                                      | Implemented; open until `test-rust-project` releases through it          |
-| `rust-workflows`               | Check `releases/` files at verify time (docker parity #36)                                                                           | Open                                                                     |
-| `test-rust-project`            | Release through this repository's release lane (#5)                                                                                  | After the first release of this repository                               |
-| `cbom-action`                  | CBOM coverage for Rust (#10, closed)                                                                                                 | Parked until [CBOMkit](https://github.com/cbomkit/cbomkit) supports Rust |
-| `nexus-publish-action`         | Nexus Cargo repositories for snapshots (#185)                                                                                        | Not available on LF Nexus; snapshots stay artefacts (Q8)                 |
+| Repository             | Item                                                                 | State                                                                             |
+| ---------------------- | -------------------------------------------------------------------- | --------------------------------------------------------------------------------- |
+| `rust-workflows`       | Lanes #4, #6 (epic #8)                                               | Implemented; first release pending                                                |
+| `rust-workflows`       | Release lane #5                                                      | Implemented; open until `test-rust-project` releases through it                   |
+| `rust-workflows`       | Check `releases/` files at verify time, as the docker lanes do (#22) | Open                                                                              |
+| `test-rust-project`    | Release through this repository's release lane (#5)                  | After the first release of this repository                                        |
+| `cbom-action`          | CBOM coverage for Rust (#10, closed)                                 | Parked until [CBOMkit](https://github.com/cbomkit/cbomkit) supports Rust          |
+| `nexus-publish-action` | Nexus Cargo repositories for snapshots (#185, closed)                | Parked until LF Nexus runs a Cargo-capable release; snapshots stay artefacts (Q8) |
 
 <!-- markdownlint-enable MD013 -->
