@@ -379,11 +379,13 @@ alongside the manifest versioning the lane started with, through
   refuses a workspace member that doesn't carry `0.0.0`, and the
   `build` job refuses a publishable one before compiling anything.
 
-Under `tag` the tests, audit and SBOM still read the committed
-checkout, so the SBOM names the project's own crates at `0.0.0`
-(sbom-action #68). Manifest-versioned releases through the merge lane
-(Option B) come later; Model B keeps reading the release file's
-version.
+Under `tag` the SBOM job passes the same version as sbom-action's
+`cargo_version` (v0.7.0, #68), which applies the same rewrite for its
+own Cargo calls and restores the files afterwards, so the release SBOM
+names the crates as they ship. The tests and audit read the committed
+checkout: a test of `CARGO_PKG_VERSION` sees `0.0.0`.
+Manifest-versioned releases through the merge lane (Option B) come
+later; Model B keeps reading the release file's version.
 
 ### Q8: Merge job graph (Model B)
 
@@ -765,7 +767,6 @@ proposal.
 | `rust-workflows`               | Lanes #4, #6 (epic #8)                                                                                                               | Implemented; first release pending                                       |
 | `rust-workflows`               | Release lane #5                                                                                                                      | Implemented; open until `test-rust-project` releases through it          |
 | `rust-workflows`               | Check `releases/` files at verify time (docker parity #36)                                                                           | Open                                                                     |
-| `sbom-action`                  | Describe the version a tag-versioned release stamps, rather than the `0.0.0` placeholder (Q7, sbom-action #68)                       | Open                                                                     |
 | `test-rust-project`            | Release through this repository's release lane (#5)                                                                                  | After the first release of this repository                               |
 | `cbom-action`                  | CBOM coverage for Rust (#10, closed)                                                                                                 | Parked until [CBOMkit](https://github.com/cbomkit/cbomkit) supports Rust |
 | `nexus-publish-action`         | Nexus Cargo repositories for snapshots (#185)                                                                                        | Not available on LF Nexus; snapshots stay artefacts (Q8)                 |

@@ -1093,6 +1093,10 @@ jobs:
           cargo_features: ${{ inputs.features }}
           cargo_all_features: ${{ inputs.all_features }}
           cargo_no_default_features: ${{ inputs.no_default_features }}
+          # Under version_source 'tag', the version the build and
+          # publish stamp over the 0.0.0 placeholder, so the release SBOM
+          # names the crates as they ship; empty describes the checkout.
+          cargo_version: ${{ needs.tag-validate.outputs.stamp }}
           sbom_format: ${{ inputs.sbom_format }}
           include_dev: ${{ inputs.sbom_include_dev }}
           output_directory: ${{ runner.temp }}/sbom

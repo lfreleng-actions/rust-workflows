@@ -219,10 +219,11 @@ crates carry it.
   Binaries embed the release version. The lane fails before compiling
   when a publishable crate carries anything but `0.0.0`.
 
-  The tests, audit and SBOM read the checkout as committed: a test of
-  `CARGO_PKG_VERSION` sees `0.0.0`, and the SBOM names the project's
-  own crates at `0.0.0`. The third-party dependencies that the audit
-  and Grype check are the same either way.
+  The SBOM names the project's own crates at the release version too,
+  through sbom-action's `cargo_version`, which restores the files
+  afterwards. The tests and audit read the checkout as committed, so a
+  test of `CARGO_PKG_VERSION` sees `0.0.0`; the third-party
+  dependencies the audit checks are the same either way.
 
 ### Model B release files
 
