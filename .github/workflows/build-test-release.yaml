@@ -603,7 +603,7 @@ jobs:
       - name: 'Gather repository metadata'
         id: repo-metadata
         # yamllint disable-line rule:line-length
-        uses: lfreleng-actions/repository-metadata-action@b2078d32ca207a0e110b2157a95271a35688c8e7  # v0.3.2
+        uses: lfreleng-actions/repository-metadata-action@2206d754f65f1a90f57b49be546712c5f594def2  # v0.3.3
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           github_summary: 'true'
@@ -1042,7 +1042,7 @@ jobs:
       - name: 'Generate SBOM'
         id: sbom
         # yamllint disable-line rule:line-length
-        uses: lfreleng-actions/sbom-action@f394b50598df99634434da3dc231e14e74a690c8  # v0.5.0
+        uses: lfreleng-actions/sbom-action@05223a5c34ad473fccb8c2332b1381914c83bc82  # v0.6.0
         env:
           RUSTUP_TOOLCHAIN: ${{ needs.rust-metadata.outputs.toolchain }}
         with:
@@ -1858,7 +1858,7 @@ jobs:
       - name: 'Promote draft release'
         if: steps.state.outputs.draft == 'true'
         # yamllint disable-line rule:line-length
-        uses: lfreleng-actions/draft-release-promote-action@e420b392557c9b1eea642f0d54dec4ff39086d5f  # v0.1.5
+        uses: lfreleng-actions/draft-release-promote-action@3959dd702aab09b2885a68e57f6608003a6aa2bd  # v0.1.6
         env:
           GH_REPO: ${{ inputs.repository || github.repository }}
         with:

@@ -44,7 +44,7 @@ State on 2026-10-17.
 | Build        | `rust-build-action`         | Released v0.1.0: `version` input for tag-based versioning                                             |
 | Test         | `rust-test-action`          | Released v0.0.1                                                                                       |
 | Audit        | `rust-audit-action`         | Released v0.0.1                                                                                       |
-| SBOM         | `sbom-action`               | Released v0.5.0: `cyclonedx` backend with a `cargo` dependency manager and feature selection          |
+| SBOM         | `sbom-action`               | Released v0.6.0: `cyclonedx` backend with a `cargo` dependency manager and feature selection          |
 | Scan         | `grype-scan-action`         | Released v0.4.0: dependency policy, Cargo graph classification                                        |
 | CBOM         | `cbom-action`               | Released v0.0.1; no Rust coverage upstream (#10), so the lanes scan other languages alone             |
 | Publish      | `rust-crate-publish-action` | Released v0.3.0: named registries, workspace sets, semver checks, `toolchain` and `version` inputs    |
