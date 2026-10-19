@@ -933,7 +933,7 @@ jobs:
       - name: 'Generate SBOM'
         id: sbom
         # yamllint disable-line rule:line-length
-        uses: lfreleng-actions/sbom-action@05223a5c34ad473fccb8c2332b1381914c83bc82  # v0.6.0
+        uses: lfreleng-actions/sbom-action@73cdda97132f74a64733b238747d34151444da15  # v0.7.0
         env:
           RUSTUP_TOOLCHAIN: ${{ needs.rust-metadata.outputs.toolchain }}
         with:

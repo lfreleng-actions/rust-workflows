@@ -37,18 +37,18 @@ State on 2026-10-17.
 
 <!-- markdownlint-disable MD013 -->
 
-| Stage        | Repository                  | State                                                                                                 |
-| ------------ | --------------------------- | ----------------------------------------------------------------------------------------------------- |
-| Metadata     | `build-metadata-action`     | Released v0.10.0 with Rust support                                                                    |
-| Lint         | `standalone-linting-action` | Released v0.7.0 with Rust toolchain preparation                                                       |
-| Build        | `rust-build-action`         | Released v0.1.0: `version` input for tag-based versioning                                             |
-| Test         | `rust-test-action`          | Released v0.0.1                                                                                       |
-| Audit        | `rust-audit-action`         | Released v0.0.1                                                                                       |
-| SBOM         | `sbom-action`               | Released v0.6.0: `cyclonedx` backend with a `cargo` dependency manager and feature selection          |
-| Scan         | `grype-scan-action`         | Released v0.4.0: dependency policy, Cargo graph classification                                        |
-| CBOM         | `cbom-action`               | Released v0.0.1; no Rust coverage upstream (#10), so the lanes scan other languages alone             |
-| Publish      | `rust-crate-publish-action` | Released v0.3.0: named registries, workspace sets, semver checks, `toolchain` and `version` inputs    |
-| Test fixture | `test-rust-project`         | Crate `lfreleng-test-rust-project` 0.1.2 on crates.io, published through Trusted Publishing; variants |
+| Stage        | Repository                  | State                                                                                                                    |
+| ------------ | --------------------------- | ------------------------------------------------------------------------------------------------------------------------ |
+| Metadata     | `build-metadata-action`     | Released v0.10.0 with Rust support                                                                                       |
+| Lint         | `standalone-linting-action` | Released v0.7.0 with Rust toolchain preparation                                                                          |
+| Build        | `rust-build-action`         | Released v0.1.0: `version` input for tag-based versioning                                                                |
+| Test         | `rust-test-action`          | Released v0.0.1                                                                                                          |
+| Audit        | `rust-audit-action`         | Released v0.0.1                                                                                                          |
+| SBOM         | `sbom-action`               | Released v0.7.0: `cyclonedx` backend with a `cargo` dependency manager, feature selection, working directory and version |
+| Scan         | `grype-scan-action`         | Released v0.4.0: dependency policy, Cargo graph classification                                                           |
+| CBOM         | `cbom-action`               | Released v0.0.1; no Rust coverage upstream (#10), so the lanes scan other languages alone                                |
+| Publish      | `rust-crate-publish-action` | Released v0.3.0: named registries, workspace sets, semver checks, `toolchain` and `version` inputs                       |
+| Test fixture | `test-rust-project`         | Crate `lfreleng-test-rust-project` 0.1.2 on crates.io, published through Trusted Publishing; variants                    |
 
 <!-- markdownlint-enable MD013 -->
 
