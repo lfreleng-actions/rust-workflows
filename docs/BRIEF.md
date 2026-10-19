@@ -760,7 +760,6 @@ proposal.
 | `sbom-action`                  | Describe the version a tag-versioned release stamps, rather than the `0.0.0` placeholder (Q7, sbom-action #68)                       | Open                                                                     |
 | `sbom-action`                  | A Cargo working directory separate from the scanned manifest, so `path_prefix` keeps its `.cargo/config.toml` (Q13, sbom-action #66) | In review (sbom-action #67, after #65)                                   |
 | `test-rust-project`            | Release through this repository's release lane (#5)                                                                                  | After the first release of this repository                               |
-| `draft-release-promote-action` | A `repository` input, so the release lane can drop its `GH_REPO` workaround; also `latest: false` (#158)                             | Open                                                                     |
 | `cbom-action`                  | CBOM coverage for Rust (#10, closed)                                                                                                 | Parked until [CBOMkit](https://github.com/cbomkit/cbomkit) supports Rust |
 | `nexus-publish-action`         | Nexus Cargo repositories for snapshots (#185)                                                                                        | Not available on LF Nexus; snapshots stay artefacts (Q8)                 |
 

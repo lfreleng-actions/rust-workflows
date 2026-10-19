@@ -1853,17 +1853,14 @@ jobs:
           fi
           echo "draft=$draft" >> "$GITHUB_OUTPUT"
 
-      # The action runs 'gh release' without --repo, and this job has
-      # no checkout to supply one, so name the repository for the CLI.
-      # Drop this once the action takes a repository input
-      # (lfreleng-actions/draft-release-promote-action#158).
+      # This job has no checkout, so name the repository: the action
+      # passes it to gh as --repo.
       - name: 'Promote draft release'
         if: steps.state.outputs.draft == 'true'
         # yamllint disable-line rule:line-length
-        uses: lfreleng-actions/draft-release-promote-action@3959dd702aab09b2885a68e57f6608003a6aa2bd  # v0.1.6
-        env:
-          GH_REPO: ${{ inputs.repository || github.repository }}
+        uses: lfreleng-actions/draft-release-promote-action@358264a2efca5ac359a90718373cbce18016bd27  # v0.1.7
         with:
+          repository: ${{ inputs.repository || github.repository }}
           token: ${{ secrets.GITHUB_TOKEN }}
           tag: ${{ needs.tag-validate.outputs.tag }}
           latest: 'true'
