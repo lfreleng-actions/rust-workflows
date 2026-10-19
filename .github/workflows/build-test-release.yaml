@@ -1855,6 +1855,8 @@ jobs:
 
       # The action runs 'gh release' without --repo, and this job has
       # no checkout to supply one, so name the repository for the CLI.
+      # Drop this once the action takes a repository input
+      # (lfreleng-actions/draft-release-promote-action#158).
       - name: 'Promote draft release'
         if: steps.state.outputs.draft == 'true'
         # yamllint disable-line rule:line-length
