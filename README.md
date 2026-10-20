@@ -55,6 +55,7 @@ none.
 | `.github/workflows/build-test-release.yaml` | Model A: tag-driven release, with opt-in crates.io publishing  | Release tag push    | [`examples/build-test-release/`](examples/build-test-release/) |
 | `.github/workflows/merge.yaml`              | Model B: merge-driven, release-file triggered publishing       | Merge to `main`     | [`examples/merge/`](examples/merge/)                           |
 | `.github/workflows/rust-metadata.yaml`      | Internal: shared toolchain, matrix and lockfile resolution     | Called by the lanes | none                                                           |
+| `.github/workflows/release-check.yaml`      | Internal: shared Model B release-file check                    | Called by the lanes | none                                                           |
 
 <!-- markdownlint-enable MD013 -->
 
@@ -63,7 +64,8 @@ Gerrit-wrapped caller (`gerrit.yaml`). Jobs in `{ }` run concurrently;
 `->` denotes sequence:
 
 ```text
-Verify:   rust-metadata -> build -> { tests | audit | sbom -> grype | cbom }
+Verify:   rust-metadata -> { check-release | build }
+          build -> { tests | audit | sbom -> grype | cbom }
 
 Release:  tag-validate -> rust-metadata -> build
             -> { audit | sbom -> grype } -> tests
@@ -245,6 +247,18 @@ Merges without a release file still build, test, audit, scan and
 dry-run the publish; their packaged crates stay a workflow artefact,
 as crates.io has no snapshots.
 
+The verify lane reads the same file on the pull request or Gerrit
+patch set that adds it, through the check the merge lane runs, so a
+file the merge would refuse fails review instead: a file YAML can't
+parse, or that isn't one mapping with a single `version` key, two
+files in one change, a name outside letters, digits, `.`, `_` and
+`-`, a version that isn't a final `X.Y.Z`, or a
+version the publishable crates don't carry, each crate named. A
+`v<version>` tag that already exists is a warning there, whichever
+commit it names, since the merged commit doesn't exist yet; the merge
+lane refuses one on another commit. A change without a release file
+passes with a note, so Model A projects lose nothing.
+
 ## Gerrit support
 
 The workflows are Gerrit-aware: when a caller sets `gerrit_refspec`
@@ -320,6 +334,9 @@ repository at the commit already running, against
 - the verify lane against the root crate and each fixture variant
   (`workspace`, `no-lockfile`, `msrv`, `dependencies`, `native`,
   `features`), across two platforms for the root crate;
+- the verify lane's release-file check on the commit that adds
+  `releases/workspace-0.1.0.yaml`, plus the check's own script against
+  scratch repositories and that fixture commit, covering each refusal;
 - the release lane as a dry run on the signed tag `v0.1.1`;
 - the merge lane as a dry run, on a commit without a release file;
 - the merge lane's release path as a dry run, on a commit that adds

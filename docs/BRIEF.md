@@ -249,18 +249,46 @@ matching the template's names:
 <!-- markdownlint-enable MD013 -->
 
 There are no `-multiarch` files (D4): every lane takes a `runners`
-matrix instead (Q10).
+matrix instead (Q10). Two internal workflows, `rust-metadata.yaml`
+(Q3, Q6) and `release-check.yaml` (Q6, Q8), hold the jobs the lanes
+share; projects never call them.
 
 ### Q6: Verify job graph
 
 ```text
 gerrit-validate -> { repository-metadata | rust-metadata }
-rust-metadata -> build -> { tests | audit | sbom -> grype | cbom }
+rust-metadata -> { check-release | build }
+build -> { tests | audit | sbom -> grype | cbom }
 ```
 
 - `repository-metadata` stays informational and gates nothing.
 - `tests`, `audit` and `sbom -> grype` run in parallel after `build`;
   none gates another, so a pull request surfaces every failure at once.
+- `check-release` reads any Model B release file the change adds under
+  `releases/`, through `release-check.yaml`, the workflow the merge
+  lane's job of the same name runs (Q8), so verify predicts merge and
+  the two can't drift, as the docker lanes check a release file before
+  merge. It checks out the commit `rust-metadata` read, so the file
+  and the crate versions come from one revision when `ref` names a
+  branch that moves; a Gerrit patch set is immutable, so that path
+  fetches the refspec itself rather than ask Gerrit for an unmerged
+  commit by SHA. On a pull request it compares that merge commit
+  with the pull request's base, so a file in any commit of the change
+  counts; on a Gerrit patch set, or an explicit `ref`, it compares the
+  commit with its first parent. It fails on a file YAML can't parse,
+  or that isn't one document holding a mapping with a single
+  top-level `version` key (a parser reads it, so `1.2.0#rc` is the one
+  scalar YAML makes of it, not `1.2.0` with a comment), two files in
+  one change, a name outside letters, digits, `.`, `_` and `-` (the
+  name lands in `GITHUB_OUTPUT`, where a newline could forge a
+  record), a version that isn't a final `X.Y.Z`, and a version
+  differing from any crate `rust-metadata` lists as publishable,
+  naming each such crate. A `v<version>` tag that already exists is a
+  warning, whichever commit it names (`tag_conflict: review`): the
+  merged commit doesn't exist yet, so even a tag on the commit under
+  review names other source, and the merge lane refuses the release.
+  The job runs on every change and costs seconds; without a release
+  file it reports none and passes, so a Model A project loses nothing.
 - `tests` runs as a matrix that `rust-metadata` builds, chosen by
   `test_matrix`:
   - `project`: one leg, on the project toolchain;
@@ -405,9 +433,9 @@ resolve-commit -> check-release -> rust-metadata -> build
   the full Grype scan catches CVEs published since the pull request
   (grype-scan-action #10, phase 3).
 - A release happens when the merged change adds one YAML file directly
-  under `releases/`, a regular file with a single top-level
-  `version: X.Y.Z`: a final release with no pre-release or build
-  part, as Model A requires of its tags. On a GitHub push,
+  under `releases/`, a regular file holding one mapping with a single
+  top-level `version: X.Y.Z`: a final release with no pre-release or
+  build part, as Model A requires of its tags. On a GitHub push,
   `check-release` looks at every commit the push added, so a batched
   push or a rebase merge can't hide a release file in an earlier
   commit; on a Gerrit dispatch it compares the merged commit with its
@@ -418,7 +446,11 @@ resolve-commit -> check-release -> rust-metadata -> build
 - `check-release` records the merged commit once, and every later
   job checks out that commit on both checkout paths. The version
   check, the build, the gates and the upload then all act on one
-  commit, and a later merge can't hide this one's release file.
+  commit, and a later merge can't hide this one's release file. The
+  job calls `release-check.yaml`, which the verify lane runs on the
+  change that adds the file (Q6), so a file this job would refuse
+  fails review first. Here the comparison with the crates waits for
+  `crate-verify`: `rust-metadata` reads the commit this job records.
 - A Gerrit dispatch names a branch, which a later merge can move
   before the run starts, so `resolve-commit` asks Gerrit, not the
   mirror, which commit merged the change, as node-workflows does.
@@ -457,8 +489,10 @@ resolve-commit -> check-release -> rust-metadata -> build
   publishes, because a crates.io version is permanent: an earlier run
   may have tagged the version without publishing it, and the lane
   must not then publish other source under it. A dry run reports the
-  conflict as a warning. A lookup error other than "not found" stops
-  the run rather than assume the tag is free. No
+  conflict as a warning. A lookup error other than "not found", for
+  the tag or for the object an annotated tag names, stops the run
+  rather than assume the tag is free, as a warning where a conflict
+  is one. No
   sibling lane tags yet, and signed tags remain a release-engineering
   decision (docker-workflows #110), so Gerrit projects set
   `create_tag: false` and tag in Gerrit, which replicates to the
@@ -707,6 +741,24 @@ changes once upstream support exists.
     `path_prefix`. The root call also enables CBOM, which proves the
     job's wiring and its clean skip on a pure Rust project, not a
     scan;
+  - the verify lane's release-file check on the fixture's merge commit
+    that adds `releases/workspace-0.1.0.yaml`, with the workspace
+    variant selected and the other stages off, which reports release
+    `0.1.0`; and the check's own script, extracted from
+    `release-check.yaml` and run against scratch repositories and that
+    fixture commit, so each refusal runs without a red lane run: a
+    malformed file, a file YAML can't parse, a duplicate or missing
+    version key, two YAML documents, two files in one change, a
+    pre-release version, a release file renamed from the last one
+    (git's rename detection would hide the new path, so the diff runs
+    without it), a version the crates don't carry (the fixture
+    commit read with the root crate selected), and a release file in
+    an earlier commit of a batched change, which the base comparison
+    finds and a comparison with the first parent alone misses; and the
+    tag check's script against a stub `gh`, across `fail`, `warn` and
+    `review` for a free tag, a tag on the commit, one on another
+    commit, an annotated tag, an unreadable tag object and a failed
+    lookup;
   - the release lane with `dry_run: true` on the signed tag `v0.1.1`;
   - the merge lane with `dry_run: true`, on a commit that adds no
     release file, and again on the fixture's merge commit that adds
@@ -721,7 +773,8 @@ changes once upstream support exists.
   - a final job that checks the artefacts the lanes left: the resolved
     lockfile, the SBOM contents, the dependency-change sidecar, both
     platforms' binaries, the MSRV leg and the packaged crates. It also
-    checks the merge calls' outputs: no release on the first, and on
+    checks the verify lane's release-file outputs and the merge calls'
+    outputs: no release on the first, and on
     the second `has_release: true`, version `0.1.0`, and both
     publishable members, without the `publish = false` one, in
     `crate_name` from crate verification.
@@ -762,13 +815,12 @@ proposal.
 
 <!-- markdownlint-disable MD013 -->
 
-| Repository             | Item                                                                 | State                                                                             |
-| ---------------------- | -------------------------------------------------------------------- | --------------------------------------------------------------------------------- |
-| `rust-workflows`       | Lanes #4, #6 (epic #8)                                               | Implemented; first release pending                                                |
-| `rust-workflows`       | Release lane #5                                                      | Implemented; open until `test-rust-project` releases through it                   |
-| `rust-workflows`       | Check `releases/` files at verify time, as the docker lanes do (#22) | Open                                                                              |
-| `test-rust-project`    | Release through this repository's release lane (#5)                  | After the first release of this repository                                        |
-| `cbom-action`          | CBOM coverage for Rust (#10, closed)                                 | Parked until [CBOMkit](https://github.com/cbomkit/cbomkit) supports Rust          |
-| `nexus-publish-action` | Nexus Cargo repositories for snapshots (#185, closed)                | Parked until LF Nexus runs a Cargo-capable release; snapshots stay artefacts (Q8) |
+| Repository             | Item                                                  | State                                                                             |
+| ---------------------- | ----------------------------------------------------- | --------------------------------------------------------------------------------- |
+| `rust-workflows`       | Lanes #4, #6 (epic #8)                                | Merged in #10; released in v0.0.1                                                 |
+| `rust-workflows`       | Release lane #5                                       | Released in v0.0.1; open until `test-rust-project` releases through it            |
+| `test-rust-project`    | Release through this repository's release lane (#5)   | In progress                                                                       |
+| `cbom-action`          | CBOM coverage for Rust (#10, closed)                  | Parked until [CBOMkit](https://github.com/cbomkit/cbomkit) supports Rust          |
+| `nexus-publish-action` | Nexus Cargo repositories for snapshots (#185, closed) | Parked until LF Nexus runs a Cargo-capable release; snapshots stay artefacts (Q8) |
 
 <!-- markdownlint-enable MD013 -->

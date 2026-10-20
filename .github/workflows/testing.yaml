@@ -300,6 +300,394 @@ jobs:
       grype_gate_when: ${{ matrix.grype_gate_when }}
       artefact_suffix: -${{ matrix.name }}
 
+  # The verify lane's release-file check, on the fixture's merge commit
+  # that adds releases/workspace-0.1.0.yaml for the workspace variant:
+  # the version every publishable member carries. The other stages are
+  # off, so the run proves the check and little else. v0.1.0 already
+  # names the root crate's release on another commit, so this also
+  # exercises the advisory tag warning the verify lane gives.
+  verify-release-file:
+    name: 'Verify (release file)'
+    # A reusable workflow may not request permissions its caller lacks,
+    # and GitHub checks every nested job when the run starts, the
+    # skipped ones included, so this grants what the Grype job declares.
+    permissions:
+      contents: read
+      pull-requests: read  # repository-metadata-action queries PR data
+      issues: read  # grype-scan-action reads cve-bypass issues
+    uses: $/.github/workflows/build-test.yaml
+    with:
+      repository: 'lfreleng-actions/test-rust-project'
+      ref: 'bce2cc4d755482611d38a2f8f90661a89efcf4f6'
+      path_prefix: 'variants/workspace'
+      tests_enabled: false
+      audit_enabled: false
+      sbom_enabled: false
+      artefact_suffix: '-release-file'
+
+  # The release-file check's own script, run outside a lane against
+  # scratch repositories and the fixture, so every refusal the lanes
+  # make is exercised without a red lane run: a malformed file, a file
+  # YAML can't parse, a duplicate or missing version key, two YAML
+  # documents, a value with a trailing newline, two files in one
+  # change, a pre-release version, a release file renamed from the
+  # last one, a name
+  # outside the plain set, a version the crates don't carry (the
+  # fixture's merge commit read with the root crate selected), and a
+  # release file in an earlier commit of a batched change, which the
+  # base comparison finds and a tip-only one misses. The tag check runs
+  # the same way against a stub gh, across its three policies.
+  release-check-cases:
+    name: 'Release File Checks'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    timeout-minutes: 10
+    steps:
+      - name: 'Harden runner'
+        # yamllint disable-line rule:line-length
+        uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43  # v2.22.3
+        with:
+          egress-policy: 'audit'
+
+      - name: 'Checkout repository'
+        # yamllint disable-line rule:line-length
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      # The step reads its environment alone, so the script it runs is
+      # the one the lanes run, not a copy that could drift. yq ships on
+      # the runner image.
+      - name: 'Extract the detection script'
+        shell: bash
+        env:
+          SCRIPT: ${{ runner.temp }}/detect.sh
+        run: |
+          # Extract the detection script
+          yq '.jobs.check-release.steps[] | select(.id == "detect") | .run' \
+            .github/workflows/release-check.yaml > "$SCRIPT"
+          grep -q '^set -euo pipefail$' "$SCRIPT"
+          bash -n "$SCRIPT"
+          wc -l "$SCRIPT"
+
+      - name: 'Run the cases'
+        shell: bash
+        env:
+          SCRIPT: ${{ runner.temp }}/detect.sh
+          CASES: ${{ runner.temp }}/cases
+          FIXTURE: 'https://github.com/lfreleng-actions/test-rust-project'
+          FIXTURE_SHA: 'bce2cc4d755482611d38a2f8f90661a89efcf4f6'
+          GIT_AUTHOR_NAME: 'Release Check'
+          GIT_AUTHOR_EMAIL: 'release-check@example.invalid'
+          GIT_COMMITTER_NAME: 'Release Check'
+          GIT_COMMITTER_EMAIL: 'release-check@example.invalid'
+        run: |
+          # Run the cases
+          set -euo pipefail
+          failed=0
+          pass() { echo "✅ $1"; }
+          miss() { echo "::error::$1"; failed=1; }
+
+          # run <dir> <base> <publishable>: the script's exit code lands
+          # in rc, its output in log, and GITHUB_OUTPUT in a scratch file.
+          export GITHUB_OUTPUT="$CASES/output"
+          export GITHUB_STEP_SUMMARY="$CASES/summary"
+          run() {
+            export BASE="$2" PUBLISHABLE="$3"
+            : > "$GITHUB_OUTPUT"
+            : > "$GITHUB_STEP_SUMMARY"
+            rc=0
+            log="$(cd "$1" && bash "$SCRIPT" 2>&1)" || rc=$?
+          }
+          expect_fail() {
+            if [ "$rc" -ne 0 ] && grep -qF -- "$2" <<< "$log"; then
+              pass "$1"
+            else
+              miss "$1: exit $rc, output: $log"
+            fi
+          }
+          outputs() { tr '\n' ' ' < "$GITHUB_OUTPUT"; }
+          expect_release() {
+            if [ "$rc" -eq 0 ] \
+              && grep -qx 'has_release=true' "$GITHUB_OUTPUT" \
+              && grep -qx "version=$2" "$GITHUB_OUTPUT" \
+              && grep -qx "file=$3" "$GITHUB_OUTPUT"; then
+              pass "$1"
+            else
+              miss "$1: exit $rc, output: $log; $(outputs)"
+            fi
+          }
+          expect_none() {
+            if [ "$rc" -eq 0 ] \
+              && grep -qx 'has_release=false' "$GITHUB_OUTPUT"; then
+              pass "$1"
+            else
+              miss "$1: exit $rc, output: $log; $(outputs)"
+            fi
+          }
+          # scratch <name>: a repository with releases/README.md committed
+          scratch() {
+            local dir="$CASES/$1"
+            rm -rf "$dir"
+            git init -q -b main "$dir"
+            mkdir "$dir/releases"
+            echo 'Release files live here' > "$dir/releases/README.md"
+            git -C "$dir" add -A
+            git -C "$dir" commit -q -m 'Base'
+            echo "$dir"
+          }
+          # commit <dir> <path> <content>: one commit adding one file
+          commit() {
+            printf '%s\n' "$3" > "$1/$2"
+            git -C "$1" add -A
+            git -C "$1" commit -q -m "Add $2"
+          }
+          mkdir -p "$CASES"
+          both='[{"name": "alpha", "version": "1.2.0"},
+            {"name": "beta", "version": "1.2.0"}]'
+          mixed='[{"name": "alpha", "version": "1.2.0"},
+            {"name": "beta", "version": "1.1.0"}]'
+          final="needs 'version: X.Y.Z', a final release"
+
+          dir="$(scratch none)"
+          commit "$dir" src.txt 'not a release'
+          run "$dir" '' "$both"
+          expect_none 'A change without a release file reports none'
+
+          dir="$(scratch valid)"
+          commit "$dir" releases/1.2.0.yaml 'version: 1.2.0'
+          run "$dir" '' "$both"
+          expect_release 'A valid release file passes' 1.2.0 releases/1.2.0.yaml
+          run "$dir" '' ''
+          expect_release 'Without crates the version check is skipped' \
+            1.2.0 releases/1.2.0.yaml
+
+          dir="$(scratch quoted)"
+          commit "$dir" releases/1.2.0.yaml \
+            $'# The release\nversion: "1.2.0"  # final\nnotes: none'
+          run "$dir" '' "$both"
+          expect_release 'A quoted version with a comment passes' \
+            1.2.0 releases/1.2.0.yaml
+
+          dir="$(scratch malformed)"
+          commit "$dir" releases/1.2.yaml 'version: 1.2'
+          run "$dir" '' "$both"
+          expect_fail 'A two-part version is refused' "$final"
+
+          dir="$(scratch prerelease)"
+          commit "$dir" releases/rc.yaml 'version: 1.2.0-rc.1'
+          run "$dir" '' "$both"
+          expect_fail 'A pre-release version is refused' "$final"
+
+          # '#' opens a comment only after a space, so YAML reads this
+          # value as the one scalar '1.2.0#rc'.
+          dir="$(scratch hash)"
+          commit "$dir" releases/1.2.0.yaml 'version: 1.2.0#rc'
+          run "$dir" '' "$both"
+          expect_fail 'A value with a trailing #rc is refused' "$final"
+
+          # The scalar holds a newline a shell substitution would strip.
+          dir="$(scratch newline)"
+          commit "$dir" releases/1.2.0.yaml 'version: "1.2.0\n"'
+          run "$dir" '' "$both"
+          expect_fail 'A version with a trailing newline is refused' "$final"
+
+          dir="$(scratch keyless)"
+          commit "$dir" releases/next.yaml 'name: next'
+          run "$dir" '' "$both"
+          expect_fail 'A file without a version key is refused' \
+            "exactly one top-level 'version' key"
+
+          dir="$(scratch duplicate)"
+          commit "$dir" releases/1.2.0.yaml \
+            $'version: 1.2.0\n"version": 1.3.0'
+          run "$dir" '' "$both"
+          expect_fail 'A duplicate version key is refused' \
+            "exactly one top-level 'version' key"
+
+          dir="$(scratch documents)"
+          commit "$dir" releases/1.2.0.yaml \
+            $'version: 1.2.0\n---\nversion: 1.3.0'
+          run "$dir" '' "$both"
+          expect_fail 'Two YAML documents are refused' 'holds 2 YAML documents'
+
+          dir="$(scratch sequence)"
+          commit "$dir" releases/1.2.0.yaml '- version: 1.2.0'
+          run "$dir" '' "$both"
+          expect_fail 'A file that is not a mapping is refused' \
+            'must be a YAML mapping'
+
+          dir="$(scratch invalid)"
+          commit "$dir" releases/1.2.0.yaml 'version: [1.2.0'
+          run "$dir" '' "$both"
+          expect_fail 'A file YAML cannot parse is refused' 'is not valid YAML'
+
+          dir="$(scratch two)"
+          printf 'version: 1.2.0\n' > "$dir/releases/1.2.0.yaml"
+          printf 'version: 1.3.0\n' > "$dir/releases/1.3.0.yml"
+          git -C "$dir" add -A
+          git -C "$dir" commit -q -m 'Add two release files'
+          run "$dir" '' "$both"
+          expect_fail 'Two release files in one change are refused' \
+            'adds 2 release files'
+
+          dir="$(scratch named)"
+          commit "$dir" 'releases/odd name.yaml' 'version: 1.2.0'
+          run "$dir" '' "$both"
+          expect_fail 'A name outside the plain set is refused' \
+            'Release file names use'
+
+          dir="$(scratch mismatch)"
+          commit "$dir" releases/1.2.0.yaml 'version: 1.2.0'
+          run "$dir" '' "$mixed"
+          expect_fail 'A version the crates do not carry names them' \
+            'another version: beta 1.1.0'
+
+          # A release file renamed from the previous one, with the new
+          # version: git calls that a rename, which an added-files diff
+          # would miss unless rename detection is off.
+          dir="$(scratch renamed)"
+          commit "$dir" releases/1.2.0.yaml \
+            $'# Release request\n# The version the crates carry\nversion: 1.2.0'
+          base="$(git -C "$dir" rev-parse HEAD)"
+          git -C "$dir" mv releases/1.2.0.yaml releases/1.3.0.yaml
+          sed -i 's/1\.2\.0/1.3.0/' "$dir/releases/1.3.0.yaml"
+          git -C "$dir" add -A
+          git -C "$dir" commit -q -m 'Release 1.3.0'
+          git -C "$dir" diff --name-status "$base" HEAD -- releases \
+            | grep -q '^R' || miss 'The renamed fixture is not a rename to git'
+          run "$dir" "$base" '[{"name": "alpha", "version": "1.3.0"}]'
+          expect_release 'A release file renamed from the last one counts' \
+            1.3.0 releases/1.3.0.yaml
+          run "$dir" '' '[{"name": "alpha", "version": "1.3.0"}]'
+          expect_release 'The tip comparison sees the renamed file too' \
+            1.3.0 releases/1.3.0.yaml
+
+          dir="$(scratch batched)"
+          base="$(git -C "$dir" rev-parse HEAD)"
+          commit "$dir" releases/1.2.0.yaml 'version: 1.2.0'
+          commit "$dir" src.txt 'a later commit'
+          run "$dir" "$base" "$both"
+          expect_release 'A release file in an earlier commit counts' \
+            1.2.0 releases/1.2.0.yaml
+          run "$dir" '' "$both"
+          expect_none 'The tip alone misses it, so the base matters'
+
+          # The fixture's merge commit, which adds the workspace
+          # variant's release file, read twice: as the verify lane does
+          # with that variant selected, and with the root crate, whose
+          # version differs.
+          dir="$CASES/fixture"
+          rm -rf "$dir"
+          git init -q "$dir"
+          git -C "$dir" fetch -q --depth 2 "$FIXTURE" "$FIXTURE_SHA"
+          git -C "$dir" checkout -q FETCH_HEAD
+          long='name-too-long-for-crates-io-by-design'
+          members="[{\"name\": \"lfreleng-fixture-workspace-cli-$long\",
+            \"version\": \"0.1.0\"},
+            {\"name\": \"lfreleng-fixture-workspace-core-$long\",
+            \"version\": \"0.1.0\"}]"
+          run "$dir" '' "$members"
+          expect_release 'The fixture release passes with the workspace' \
+            0.1.0 releases/workspace-0.1.0.yaml
+          run "$dir" '' \
+            '[{"name": "lfreleng-test-rust-project", "version": "0.1.1"}]'
+          expect_fail 'The fixture release fails with the root crate' \
+            'another version: lfreleng-test-rust-project 0.1.1'
+          exit "$failed"
+
+      # The tag check's own script, with a stub in place of gh: the
+      # three policies against a free tag, a tag on the checked-out
+      # commit, one on another commit, an annotated tag naming the
+      # commit, a tag object that can't be read and a lookup that
+      # fails, so a policy that stops failing, or stops warning, fails
+      # here.
+      - name: 'Extract the tag check'
+        shell: bash
+        env:
+          SCRIPT: ${{ runner.temp }}/tag-check.sh
+        run: |
+          # Extract the tag check
+          yq '.jobs.check-release.steps[]
+            | select(.name == "Check the release tag") | .run' \
+            .github/workflows/release-check.yaml > "$SCRIPT"
+          grep -q '^set -euo pipefail$' "$SCRIPT"
+          bash -n "$SCRIPT"
+
+      - name: 'Run the tag cases'
+        shell: bash
+        env:
+          SCRIPT: ${{ runner.temp }}/tag-check.sh
+          STUB: ${{ runner.temp }}/stub
+          SHA: '1111111111111111111111111111111111111111'
+          OTHER: '2222222222222222222222222222222222222222'
+          OBJECT: '3333333333333333333333333333333333333333'
+          TAG: 'v1.2.0'
+          REPOSITORY: 'example/fixture'
+        run: |
+          # Run the tag cases
+          set -euo pipefail
+          failed=0
+          pass() { echo "✅ $1"; }
+          miss() { echo "::error::$1"; failed=1; }
+          # A gh that answers the script's two lookups as CASE says:
+          # the tag's ref, then the object an annotated tag names.
+          mkdir -p "$STUB"
+          cat > "$STUB/gh" <<'EOF'
+          #!/usr/bin/env bash
+          case "$CASE:$2" in
+            free:*/ref/tags/*) echo 'gh: Not Found (HTTP 404)' >&2; exit 1 ;;
+            same:*/ref/tags/*) echo "commit $SHA" ;;
+            other:*/ref/tags/*) echo "commit $OTHER" ;;
+            annotated:*/ref/tags/* | unreadable:*/ref/tags/*)
+              echo "tag $OBJECT" ;;
+            annotated:*/git/tags/*) echo "$SHA" ;;
+            unreadable:*/git/tags/*) echo 'gh: HTTP 502' >&2; exit 1 ;;
+            unknown:*/ref/tags/*) echo 'gh: HTTP 503' >&2; exit 1 ;;
+            *) echo "unexpected call: $*" >&2; exit 99 ;;
+          esac
+          EOF
+          chmod +x "$STUB/gh"
+          export RUNNER_TEMP="$STUB" GH_TOKEN=stub
+          # expect <policy> <case> <exit> <text>: the script's exit code
+          # and a line its output must carry.
+          expect() {
+            local rc=0 log
+            log="$(CASE="$2" TAG_CONFLICT="$1" PATH="$STUB:$PATH" \
+              bash "$SCRIPT" 2>&1)" || rc=$?
+            if [ "$rc" -eq "$3" ] && grep -qF -- "$4" <<< "$log"; then
+              pass "$1: $2"
+            else
+              miss "$1: $2: exit $rc, output: $log"
+            fi
+          }
+          for policy in fail warn review; do
+            code=0
+            mark='::warning::'
+            if [ "$policy" = fail ]; then
+              code=1
+              mark='::error::'
+            fi
+            expect "$policy" free 0 "$TAG is free"
+            expect "$policy" other "$code" \
+              "$mark$TAG already exists on $OTHER, not $SHA"
+            expect "$policy" unreadable "$code" \
+              "${mark}Could not read the tag object $TAG names"
+            expect "$policy" unknown "$code" "${mark}Could not look up $TAG"
+          done
+          # A tag on the commit itself: fine for a merge and its dry run,
+          # a warning for a review, whose commit never merges as itself.
+          for policy in fail warn; do
+            expect "$policy" same 0 "$TAG already names $SHA"
+            expect "$policy" annotated 0 "$TAG already names $SHA"
+          done
+          expect review same 0 \
+            "::warning::$TAG already exists, on the commit under review"
+          expect review annotated 0 \
+            "::warning::$TAG already exists, on the commit under review"
+          exit "$failed"
+
   # The release lane, rehearsed on the signed tag that published crate
   # 0.1.1. A reusable workflow may not request permissions its caller
   # lacks, and GitHub checks every job when the run starts, so this
@@ -392,6 +780,7 @@ jobs:
     name: 'Check Artefacts'
     needs:
       - verify
+      - verify-release-file
       - release-dry-run
       - merge-dry-run
       - merge-release-dry-run
@@ -399,6 +788,7 @@ jobs:
     # yamllint disable rule:line-length
     if: >-
       ${{ !cancelled() && needs.verify.result == 'success'
+      && needs.verify-release-file.result == 'success'
       && contains(fromJSON('["success", "skipped"]'), needs.release-dry-run.result)
       && contains(fromJSON('["success", "skipped"]'), needs.merge-dry-run.result)
       && contains(fromJSON('["success", "skipped"]'), needs.merge-release-dry-run.result) }}
@@ -423,6 +813,9 @@ jobs:
         shell: bash
         env:
           DIR: ${{ runner.temp }}/artefacts
+          # yamllint disable-line rule:line-length
+          VERIFY_HAS_RELEASE: ${{ needs.verify-release-file.outputs.has_release }}
+          VERIFY_VERSION: ${{ needs.verify-release-file.outputs.version }}
           RELEASE_RAN: ${{ needs.release-dry-run.result == 'success' }}
           MERGE_RAN: ${{ needs.merge-dry-run.result == 'success' }}
           MERGE_HAS_RELEASE: ${{ needs.merge-dry-run.outputs.has_release }}
@@ -490,6 +883,13 @@ jobs:
             pass 'The msrv variant tested the declared rust-version'
           else
             miss 'The msrv variant left no 1.85 test results'
+          fi
+          if [ "$VERIFY_HAS_RELEASE" = 'true' ] \
+            && [ "$VERIFY_VERSION" = '0.1.0' ]; then
+            pass 'The verify lane found release 0.1.0 on the fixture commit'
+          else
+            got="'$VERIFY_HAS_RELEASE', '$VERIFY_VERSION'"
+            miss "The verify lane reported has_release, version: $got"
           fi
           if [ "$RELEASE_RAN" != 'true' ]; then
             echo "::notice::The release dry run skipped on this event"

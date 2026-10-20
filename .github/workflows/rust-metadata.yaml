@@ -164,6 +164,11 @@ on:
       lockfile_artefact:
         description: 'Artefact holding the resolved Cargo.lock'
         value: ${{ jobs.rust-metadata.outputs.lockfile_artefact }}
+      sha:
+        description: >-
+          Commit the job read, so a later job can check out the same
+          revision when 'ref' names a branch that may move
+        value: ${{ jobs.rust-metadata.outputs.sha }}
 
 permissions: {}
 
@@ -190,6 +195,7 @@ jobs:
       manifest_dir: ${{ steps.project.outputs.dir }}
       lockfile_dir: ${{ steps.lockfile.outputs.dir }}
       lockfile_artefact: ${{ steps.lockfile.outputs.artefact }}
+      sha: ${{ steps.commit.outputs.sha }}
     steps:
       - name: 'Load egress allow-list'
         # yamllint disable-line rule:line-length
@@ -225,6 +231,17 @@ jobs:
           repository: ${{ inputs.repository || github.repository }}
           ref: ${{ inputs.ref }}
           persist-credentials: false
+
+      # The commit behind every output: a branch 'ref' can move between
+      # this job and the next, so a job comparing its own checkout with
+      # these outputs pins to this commit instead.
+      - name: 'Record the commit'
+        id: commit
+        shell: bash
+        run: |
+          # Record the commit
+          set -euo pipefail
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
       # path_prefix and manifest_path must name a regular Cargo.toml
       # inside the workspace, reached through no symlink, as the Rust
