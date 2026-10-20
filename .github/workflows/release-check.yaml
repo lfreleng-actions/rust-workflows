@@ -1,0 +1,346 @@
+---
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Linux Foundation
+
+# Shared release-file check for the lanes in this repository.
+#
+# A Model B release is a change that adds one YAML file directly under
+# releases/ carrying 'version: X.Y.Z' (docs/BRIEF.md Q8). merge.yaml
+# reads the file once the change has merged, and build-test.yaml reads
+# it on the pull request or Gerrit patch set that adds it, through this
+# one workflow, so what verify accepts, merge accepts too, and a file
+# merge would refuse fails review instead. Called through the
+# self-repository form ('$/'), as rust-metadata.yaml is. It is an
+# internal building block: projects call one of the lanes, never this
+# file.
+#
+# The job reports the release file's version, and the commit it read,
+# and fails on a malformed file, several files in one change, a
+# version that is not a final X.Y.Z, or a version the publishable
+# crates don't carry. When v<version> already names another commit it
+# fails or warns, as the caller chose.
+name: '[R] Rust Release Check'
+
+# yamllint disable-line rule:truthy
+on:
+  workflow_call:
+    inputs:
+      repository:
+        description: 'Repository to check out (owner/name)'
+        required: false
+        type: string
+        default: ''
+      ref:
+        description: 'Branch/tag/SHA to check out (empty = event ref)'
+        required: false
+        type: string
+        default: ''
+      base:
+        description: >-
+          Commit the branch held before the change: every release file
+          added since it counts, so a batched push or a pull request of
+          several commits can't hide one. Empty, or a commit the
+          checkout can't reach, compares the checked-out commit with its
+          first parent.
+        required: false
+        type: string
+        default: ''
+      publishable_packages:
+        description: >-
+          JSON array of {name, version} objects, as rust-metadata lists
+          them. A release file whose version differs from any entry
+          fails the check. Empty skips the comparison.
+        required: false
+        type: string
+        default: ''
+      tag_conflict:
+        description: >-
+          What to do when v<version> already names another commit:
+          'fail' stops the run, 'warn' reports and carries on
+        required: false
+        type: string
+        default: 'fail'
+      harden_runner_egress:
+        description: "Harden-runner egress policy: 'block' or 'audit'"
+        required: false
+        type: string
+        default: 'block'
+      harden_runner_allowlist:
+        description: 'Out-of-band harden-runner allow-list configuration'
+        required: false
+        type: string
+        # yamllint disable-line rule:line-length
+        default: 'lfreleng-actions//.github/harden-runner/lfreleng-actions/allow_list.txt@084d6861688632b2edb6bde3c180145bebf9cc7a'  # v0.17.2
+      gerrit_refspec:
+        description: >-
+          Gerrit refspec, or commit, to check out: the patch set under
+          review, or the commit the merge lane resolved
+        required: false
+        type: string
+        default: ''
+      gerrit_project:
+        description: 'Gerrit project name'
+        required: false
+        type: string
+        default: ''
+      gerrit_branch:
+        description: 'Gerrit target branch'
+        required: false
+        type: string
+        default: ''
+      gerrit_url:
+        description: 'Gerrit server URL; empty uses vars.GERRIT_URL'
+        required: false
+        type: string
+        default: ''
+    outputs:
+      has_release:
+        description: "'true' when the change adds a release file"
+        value: ${{ jobs.check-release.outputs.has_release }}
+      version:
+        description: 'Version the release file names; empty without one'
+        value: ${{ jobs.check-release.outputs.version }}
+      file:
+        description: 'Path of the release file; empty without one'
+        value: ${{ jobs.check-release.outputs.file }}
+      sha:
+        description: 'Commit the check read'
+        value: ${{ jobs.check-release.outputs.sha }}
+
+permissions: {}
+
+env:
+  GH_TELEMETRY: 'false'
+
+jobs:
+  check-release:
+    name: 'Check for Release File'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    timeout-minutes: 5
+    outputs:
+      has_release: ${{ steps.detect.outputs.has_release }}
+      version: ${{ steps.detect.outputs.version }}
+      file: ${{ steps.detect.outputs.file }}
+      sha: ${{ steps.detect.outputs.sha }}
+    steps:
+      - name: 'Load egress allow-list'
+        # yamllint disable-line rule:line-length
+        uses: lfreleng-actions/harden-runner-block-action@51ef68401547a8b648275129b9a21544612596d5  # v0.13.1
+        with:
+          config: ${{ inputs.harden_runner_allowlist }}
+          allow_list_summary: 'false'
+      - name: 'Harden runner'
+        # yamllint disable-line rule:line-length
+        uses: step-security/harden-runner@ccd8616d44fd3846e67624a50d5aad6d37bf2d25  # v2.22.1
+        with:
+          # yamllint disable-line rule:line-length
+          egress-policy: ${{ inputs.harden_runner_egress == 'audit' && 'audit' || 'block' }}
+          allowed-endpoints: >
+            ${{ env.CONNECTION_ALLOW_LIST }}
+
+      - name: 'Check the tag_conflict input'
+        shell: bash
+        env:
+          TAG_CONFLICT: ${{ inputs.tag_conflict }}
+        run: |
+          # Check the tag_conflict input
+          case "$TAG_CONFLICT" in
+            fail | warn) ;;
+            *)
+              echo "::error::tag_conflict: expected 'fail' or 'warn'"
+              exit 1 ;;
+          esac
+
+      # Depth 2 lets diff-tree compare the commit with its parent.
+      - name: 'Checkout Gerrit change'
+        if: inputs.gerrit_refspec != ''
+        # yamllint disable-line rule:line-length
+        uses: lfreleng-actions/checkout-gerrit-change-action@35e98c8043ec411611e464e296bcfb441a5c5093  # v1.1.2
+        with:
+          gerrit-refspec: ${{ inputs.gerrit_refspec }}
+          gerrit-project: ${{ inputs.gerrit_project }}
+          # yamllint disable-line rule:line-length
+          gerrit-url: ${{ inputs.gerrit_url != '' && inputs.gerrit_url || vars.GERRIT_URL }}
+          delay: '0s'
+          fetch-depth: '2'
+          repository: ${{ inputs.repository || github.repository }}
+          ref: refs/heads/${{ inputs.gerrit_branch }}
+      - name: 'Checkout repository'
+        if: inputs.gerrit_refspec == ''
+        # yamllint disable-line rule:line-length
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: ${{ inputs.repository || github.repository }}
+          ref: ${{ inputs.ref }}
+          # The whole history: a change can carry several commits, and
+          # the release file may arrive in any of them.
+          fetch-depth: 0
+          persist-credentials: false
+
+      # Reads the environment alone, so testing.yaml can run this same
+      # script against scratch repositories and fixture commits.
+      - name: 'Detect a release file in the change'
+        id: detect
+        shell: bash
+        env:
+          BASE: ${{ inputs.base }}
+          PUBLISHABLE: ${{ inputs.publishable_packages }}
+        run: |
+          # Detect a release file in the change
+          set -euo pipefail
+          fail() { echo "::error::$*"; exit 1; }
+          sha="$(git rev-parse HEAD)"
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          # Release files are YAML files directly under releases/. Paths
+          # are read NUL-delimited: git would otherwise quote one holding
+          # a space, a quote or a non-ASCII byte.
+          markers=(':(glob)releases/*.yaml' ':(glob)releases/*.yml')
+          if [[ "$BASE" =~ ^[0-9a-f]{40}$ ]] \
+            && [[ "$BASE" =~ [1-9a-f] ]] \
+            && git merge-base --is-ancestor "$BASE" HEAD 2> /dev/null
+          then
+            # Every commit the change added, so a release file in an
+            # earlier commit of a batched push still counts.
+            mapfile -d '' -t files < <(git diff -z --diff-filter=A \
+              --name-only "$BASE" HEAD -- "${markers[@]}")
+          else
+            if [ -n "$BASE" ]; then
+              echo "::notice::The change replaced or created the branch;" \
+                "checking the tip commit alone"
+            fi
+            root=()
+            if ! git rev-parse --verify --quiet 'HEAD^1' > /dev/null; then
+              # No parent object: a root commit, or a checkout too
+              # shallow to hold the parent the commit names.
+              if git cat-file -p HEAD | grep -q '^parent '; then
+                fail "The checkout lacks the commit's parent"
+              fi
+              root=(--root)
+            fi
+            mapfile -d '' -t files < <(git diff-tree -z -m --first-parent \
+              --diff-filter=A --no-commit-id -r --name-only \
+              ${root[@]+"${root[@]}"} HEAD -- "${markers[@]}")
+          fi
+          if [ "${#files[@]}" -eq 0 ]; then
+            echo "No release file in the change"
+            {
+              echo "has_release=false"
+              echo "version="
+              echo "file="
+            } >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # One release per change: several files would make the
+          # version an arbitrary choice.
+          if [ "${#files[@]}" -gt 1 ]; then
+            fail "The change adds ${#files[@]} release files;" \
+              "add one per change"
+          fi
+          file="${files[0]}"
+          # The name lands in GITHUB_OUTPUT, one record per line, where a
+          # newline in it could forge the recorded commit; keep names to
+          # a plain set.
+          [[ "$file" =~ ^releases/[A-Za-z0-9._-]+\.ya?ml$ ]] \
+            || fail "Release file names use letters, digits, '.', '_'" \
+              "and '-' alone"
+          # A regular file, in the commit and on disk: a symlink could
+          # request a release with content from outside the file.
+          mode="$(git ls-tree HEAD -- "$file" | cut -d' ' -f1)"
+          case "$mode" in
+            100644 | 100755) ;;
+            *) fail "$file must be a regular file" ;;
+          esac
+          if [ ! -f "$file" ] || [ -L "$file" ]; then
+            fail "$file must be a regular file"
+          fi
+          # Exactly one top-level 'version:' key, holding a bare,
+          # optionally quoted X.Y.Z and nothing after it but a comment.
+          mapfile -t lines < <(grep -E '^version[[:space:]]*:' -- "$file")
+          [ "${#lines[@]}" -eq 1 ] \
+            || fail "$file needs exactly one top-level 'version:' key"
+          number='(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)'
+          value="^version[[:space:]]*:[[:space:]]*"
+          value+="($number|'$number'|\"$number\")[[:space:]]*(#.*)?$"
+          [[ "${lines[0]}" =~ $value ]] \
+            || fail "$file needs 'version: X.Y.Z', a final release"
+          version="${BASH_REMATCH[1]//[\'\"]/}"
+          echo "Release $version from $file"
+          # Every publishable crate must carry the version, as
+          # crate-verify requires of a release merge; name each one
+          # that doesn't, so the fix is one edit.
+          if [ -n "$PUBLISHABLE" ]; then
+            jq -e 'type == "array" and all(.[]; type == "object"
+              and (.name | type) == "string"
+              and (.version | type) == "string")' \
+              <<< "$PUBLISHABLE" > /dev/null 2>&1 \
+              || fail "publishable_packages is not a JSON array of" \
+                "{name, version} objects"
+            differing="$(jq -r --arg version "$version" \
+              '[.[] | select(.version != $version)
+                | "\(.name) \(.version)"] | join(", ")' <<< "$PUBLISHABLE")"
+            if [ -n "$differing" ]; then
+              fail "$file releases $version, but these crates carry" \
+                "another version: $differing"
+            fi
+            count="$(jq length <<< "$PUBLISHABLE")"
+            if [ "$count" -gt 0 ]; then
+              echo "Every publishable crate carries $version ✅"
+            fi
+          fi
+          {
+            echo "has_release=true"
+            echo "version=$version"
+            echo "file=$file"
+          } >> "$GITHUB_OUTPUT"
+          echo "## 🦀 Release $version requested by \`$file\`" \
+            >> "$GITHUB_STEP_SUMMARY"
+
+      # A crates.io version is permanent, so a release tag that already
+      # names other source stops a merge here, before anything builds
+      # or publishes: an earlier run may have tagged the version without
+      # publishing it. The merge lane's tag job repeats the check for
+      # races. A dry run, which publishes and tags nothing, and the
+      # verify lane, whose commit the tag could never name, report the
+      # conflict as a warning and carry on.
+      - name: 'Check the release tag'
+        if: steps.detect.outputs.has_release == 'true'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPOSITORY: ${{ inputs.repository || github.repository }}
+          TAG: v${{ steps.detect.outputs.version }}
+          SHA: ${{ steps.detect.outputs.sha }}
+          TAG_CONFLICT: ${{ inputs.tag_conflict }}
+        run: |
+          # Check the release tag
+          set -euo pipefail
+          errors="$RUNNER_TEMP/tag-lookup.err"
+          stop() {
+            if [ "$TAG_CONFLICT" = 'warn' ]; then
+              echo "::warning::$*; a release merge would stop here"
+              exit 0
+            fi
+            echo "::error::$*"
+            exit 1
+          }
+          if existing="$(gh api "repos/$REPOSITORY/git/ref/tags/$TAG" \
+              --jq '.object.type + " " + .object.sha' 2> "$errors")"; then
+            target="${existing#* }"
+            if [ "${existing%% *}" = 'tag' ]; then
+              target="$(gh api "repos/$REPOSITORY/git/tags/$target" \
+                --jq .object.sha)"
+            fi
+            if [ "$target" != "$SHA" ]; then
+              stop "$TAG already exists on $target, not $SHA." \
+                "Release a new version"
+            fi
+            echo "$TAG already names $SHA ✅"
+          elif grep -q 'HTTP 404' "$errors"; then
+            echo "$TAG is free ✅"
+          else
+            # Anything but 'not found' leaves the tag unknown: stop
+            # rather than publish past a tag that may exist.
+            stop "Could not look up $TAG: $(head -c 300 "$errors")"
+          fi
