@@ -36,4 +36,4 @@ jobs:
     with:
       languages: 'actions'
       # yamllint disable-line rule:line-length
-      harden_runner_allowlist: 'lfreleng-actions//.github/harden-runner/lfreleng-actions/allow_list.txt@538904e241556d101fb908b50e2a2965fa0346cf'  # v0.16.6
+      harden_runner_allowlist: 'lfreleng-actions//.github/harden-runner/lfreleng-actions/allow_list.txt@084d6861688632b2edb6bde3c180145bebf9cc7a'  # v0.17.2
