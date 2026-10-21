@@ -732,196 +732,38 @@ jobs:
   # carrying a 'version: X.Y.Z' line. Merge commits compare with their
   # first parent, so a merged branch counts as one change. This job
   # also records the commit every later job checks out: on the Gerrit
-  # path, the one resolve-commit chose.
+  # path, the one resolve-commit chose. The check itself lives in
+  # release-check.yaml, which the verify lane runs on the change that
+  # adds the file, so a file this job would refuse fails review first.
+  # The version comparison with the crates waits for crate-verify here,
+  # as rust-metadata reads the commit this job records.
   check-release:
     name: 'Check for Release File'
     needs: resolve-commit
-    runs-on: ubuntu-latest
     permissions:
       contents: read
-    timeout-minutes: 5
-    outputs:
-      has_release: ${{ steps.detect.outputs.has_release }}
-      version: ${{ steps.detect.outputs.version }}
-      sha: ${{ steps.detect.outputs.sha }}
-    steps:
-      - name: 'Load egress allow-list'
-        # yamllint disable-line rule:line-length
-        uses: lfreleng-actions/harden-runner-block-action@51ef68401547a8b648275129b9a21544612596d5  # v0.13.1
-        with:
-          config: ${{ inputs.harden_runner_allowlist }}
-      - name: 'Harden runner'
-        # yamllint disable-line rule:line-length
-        uses: step-security/harden-runner@ccd8616d44fd3846e67624a50d5aad6d37bf2d25  # v2.22.1
-        with:
-          # yamllint disable-line rule:line-length
-          egress-policy: ${{ inputs.harden_runner_egress == 'audit' && 'audit' || 'block' }}
-          allowed-endpoints: >
-            ${{ env.CONNECTION_ALLOW_LIST }}
-
+    uses: $/.github/workflows/release-check.yaml
+    with:
+      repository: ${{ inputs.repository }}
+      ref: ${{ inputs.ref }}
+      # The commit the branch held before this push, when the run is
+      # a push to the repository it checks out. Gerrit dispatches and
+      # explicit refs compare the tip with its first parent instead.
+      # yamllint disable-line rule:line-length
+      base: ${{ github.event_name == 'push' && inputs.gerrit_refspec == '' && inputs.ref == '' && (inputs.repository == '' || inputs.repository == github.repository) && github.event.before || '' }}
+      # A dry run publishes and tags nothing, so a taken tag is a
+      # warning and the rehearsal carries on.
+      tag_conflict: ${{ inputs.dry_run && 'warn' || 'fail' }}
+      harden_runner_egress: ${{ inputs.harden_runner_egress }}
+      harden_runner_allowlist: ${{ inputs.harden_runner_allowlist }}
       # The Gerrit path checks out the commit resolve-commit chose,
       # never the branch tip, which a later merge may already have
-      # moved. Depth 2 lets diff-tree compare it with its parent.
-      - name: 'Checkout Gerrit change'
-        if: inputs.gerrit_refspec != ''
-        # yamllint disable-line rule:line-length
-        uses: lfreleng-actions/checkout-gerrit-change-action@35e98c8043ec411611e464e296bcfb441a5c5093  # v1.1.2
-        with:
-          gerrit-refspec: ${{ needs.resolve-commit.outputs.commit }}
-          gerrit-project: ${{ inputs.gerrit_project }}
-          # yamllint disable-line rule:line-length
-          gerrit-url: ${{ inputs.gerrit_url != '' && inputs.gerrit_url || vars.GERRIT_URL }}
-          delay: '0s'
-          fetch-depth: '2'
-          repository: ${{ inputs.repository || github.repository }}
-          ref: refs/heads/${{ inputs.gerrit_branch }}
-      - name: 'Checkout repository'
-        if: inputs.gerrit_refspec == ''
-        # yamllint disable-line rule:line-length
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          repository: ${{ inputs.repository || github.repository }}
-          ref: ${{ inputs.ref }}
-          # The whole history: a push can carry several commits, and the
-          # release file may arrive in any of them.
-          fetch-depth: 0
-          persist-credentials: false
-
-      - name: 'Detect a release file in the merged commit'
-        id: detect
-        shell: bash
-        env:
-          # The commit the branch held before this push, when the run is
-          # a push to the repository it checks out. Gerrit dispatches and
-          # explicit refs compare the tip with its first parent instead.
-          # yamllint disable-line rule:line-length
-          BEFORE: ${{ github.event_name == 'push' && inputs.gerrit_refspec == '' && inputs.ref == '' && (inputs.repository == '' || inputs.repository == github.repository) && github.event.before || '' }}
-        run: |
-          # Detect a release file in the merged commit
-          set -euo pipefail
-          fail() { echo "::error::$*"; exit 1; }
-          sha="$(git rev-parse HEAD)"
-          echo "sha=$sha" >> "$GITHUB_OUTPUT"
-          # Release files are YAML files directly under releases/. Paths
-          # are read NUL-delimited: git would otherwise quote one holding
-          # a space, a quote or a non-ASCII byte.
-          markers=(':(glob)releases/*.yaml' ':(glob)releases/*.yml')
-          if [[ "$BEFORE" =~ ^[0-9a-f]{40}$ ]] \
-            && [[ "$BEFORE" =~ [1-9a-f] ]] \
-            && git merge-base --is-ancestor "$BEFORE" HEAD 2> /dev/null
-          then
-            # Every commit this push added, so a release file in an
-            # earlier commit of a batched push still counts.
-            mapfile -d '' -t files < <(git diff -z --diff-filter=A \
-              --name-only "$BEFORE" HEAD -- "${markers[@]}")
-          else
-            if [ -n "$BEFORE" ]; then
-              echo "::notice::The push replaced or created the branch;" \
-                "checking the tip commit alone"
-            fi
-            root=()
-            if ! git rev-parse --verify --quiet 'HEAD^1' > /dev/null; then
-              # No parent object: a root commit, or a checkout too
-              # shallow to hold the parent the commit names.
-              if git cat-file -p HEAD | grep -q '^parent '; then
-                fail "The checkout lacks the merged commit's parent"
-              fi
-              root=(--root)
-            fi
-            mapfile -d '' -t files < <(git diff-tree -z -m --first-parent \
-              --diff-filter=A --no-commit-id -r --name-only \
-              ${root[@]+"${root[@]}"} HEAD -- "${markers[@]}")
-          fi
-          if [ "${#files[@]}" -eq 0 ]; then
-            echo "No release file in the merged commit"
-            {
-              echo "has_release=false"
-              echo "version="
-            } >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          # One release per merge: several files would make the
-          # version an arbitrary choice.
-          if [ "${#files[@]}" -gt 1 ]; then
-            fail "The merged commit adds ${#files[@]} release files;" \
-              "add one per merge"
-          fi
-          file="${files[0]}"
-          # A regular file, in the commit and on disk: a symlink could
-          # request a release with content from outside the file.
-          mode="$(git ls-tree HEAD -- "$file" | cut -d' ' -f1)"
-          case "$mode" in
-            100644 | 100755) ;;
-            *) fail "$file must be a regular file" ;;
-          esac
-          if [ ! -f "$file" ] || [ -L "$file" ]; then
-            fail "$file must be a regular file"
-          fi
-          # Exactly one top-level 'version:' key, holding a bare,
-          # optionally quoted X.Y.Z and nothing after it but a comment.
-          mapfile -t lines < <(grep -E '^version[[:space:]]*:' -- "$file")
-          [ "${#lines[@]}" -eq 1 ] \
-            || fail "$file needs exactly one top-level 'version:' key"
-          number='(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)'
-          value="^version[[:space:]]*:[[:space:]]*"
-          value+="($number|'$number'|\"$number\")[[:space:]]*(#.*)?$"
-          [[ "${lines[0]}" =~ $value ]] \
-            || fail "$file needs 'version: X.Y.Z', a final release"
-          version="${BASH_REMATCH[1]//[\'\"]/}"
-          echo "Release $version from $file"
-          {
-            echo "has_release=true"
-            echo "version=$version"
-          } >> "$GITHUB_OUTPUT"
-          echo "## 🦀 Release $version requested by \`$file\`" \
-            >> "$GITHUB_STEP_SUMMARY"
-
-      # A crates.io version is permanent, so a release tag that already
-      # names other source stops the run here, before anything builds
-      # or publishes: an earlier run may have tagged the version
-      # without publishing it. The tag job repeats the check for races.
-      # A dry run publishes and tags nothing, so it reports the
-      # conflict as a warning and carries on rehearsing.
-      - name: 'Check the release tag'
-        if: steps.detect.outputs.has_release == 'true'
-        shell: bash
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          REPOSITORY: ${{ inputs.repository || github.repository }}
-          TAG: v${{ steps.detect.outputs.version }}
-          SHA: ${{ steps.detect.outputs.sha }}
-          DRY_RUN: ${{ inputs.dry_run }}
-        run: |
-          # Check the release tag
-          set -euo pipefail
-          errors="$RUNNER_TEMP/tag-lookup.err"
-          stop() {
-            if [ "$DRY_RUN" = 'true' ]; then
-              echo "::warning::$*; a real run would stop here"
-              exit 0
-            fi
-            echo "::error::$*"
-            exit 1
-          }
-          if existing="$(gh api "repos/$REPOSITORY/git/ref/tags/$TAG" \
-              --jq '.object.type + " " + .object.sha' 2> "$errors")"; then
-            target="${existing#* }"
-            if [ "${existing%% *}" = 'tag' ]; then
-              target="$(gh api "repos/$REPOSITORY/git/tags/$target" \
-                --jq .object.sha)"
-            fi
-            if [ "$target" != "$SHA" ]; then
-              stop "$TAG already exists on $target, not $SHA." \
-                "Release a new version"
-            fi
-            echo "$TAG already names $SHA ✅"
-          elif grep -q 'HTTP 404' "$errors"; then
-            echo "$TAG is free ✅"
-          else
-            # Anything but 'not found' leaves the tag unknown: stop
-            # rather than publish past a tag that may exist.
-            stop "Could not look up $TAG: $(head -c 300 "$errors")"
-          fi
+      # moved.
+      # yamllint disable-line rule:line-length
+      gerrit_refspec: ${{ inputs.gerrit_refspec != '' && needs.resolve-commit.outputs.commit || '' }}
+      gerrit_project: ${{ inputs.gerrit_project }}
+      gerrit_branch: ${{ inputs.gerrit_branch }}
+      gerrit_url: ${{ inputs.gerrit_url }}
 
   build:
     name: 'Build (${{ matrix.platform.arch }})'

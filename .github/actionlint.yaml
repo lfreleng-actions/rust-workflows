@@ -14,11 +14,14 @@ paths:
     ignore:
       - 'unexpected key "queue" for "concurrency" section'
   # Each lane calls the shared rust-metadata.yaml through '$/', for
-  # the reason testing.yaml gives below.
+  # the reason testing.yaml gives below; the verify and merge lanes
+  # call release-check.yaml the same way.
   .github/workflows/build-test.yaml:
     ignore:
       # yamllint disable-line rule:line-length
       - 'reusable workflow call "\$/\.github/workflows/rust\-metadata\.yaml" at "uses" is not following the format'
+      # yamllint disable-line rule:line-length
+      - 'reusable workflow call "\$/\.github/workflows/release\-check\.yaml" at "uses" is not following the format'
   .github/workflows/build-test-release.yaml:
     ignore:
       # yamllint disable-line rule:line-length
@@ -27,6 +30,8 @@ paths:
     ignore:
       # yamllint disable-line rule:line-length
       - 'reusable workflow call "\$/\.github/workflows/rust\-metadata\.yaml" at "uses" is not following the format'
+      # yamllint disable-line rule:line-length
+      - 'reusable workflow call "\$/\.github/workflows/release\-check\.yaml" at "uses" is not following the format'
   .github/workflows/testing.yaml:
     ignore:
       # GitHub's self-repository reference ('$/', July 2026) resolves
