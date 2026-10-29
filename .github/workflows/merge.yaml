@@ -17,8 +17,9 @@
 # stay a workflow artefact (the build's rust-build-<arch> artefact).
 # On a release merge it also requires every crate version to equal the
 # release file's version, and publish then uploads exactly the archives
-# it verified. The tag job creates v<version> on the merged commit once
-# the crates are on crates.io.
+# it verified. The tag job creates the release file's git_tag, or
+# v<version> without one, on the merged commit once the crates are on
+# crates.io.
 #
 # resolve-commit asks Gerrit for the commit a change-merged dispatch
 # merged, and check-release records the merged commit once; every
@@ -330,8 +331,9 @@ on:
         default: 'production'
       create_tag:
         description: >-
-          Create the v<version> tag on the merged commit after a release
-          publishes. Gerrit projects tag in Gerrit instead: set false.
+          Create the release tag (the release file's git_tag, or
+          v<version>) on the merged commit after a release publishes.
+          Gerrit projects tag in Gerrit instead: set false.
         required: false
         type: boolean
         default: true
@@ -410,6 +412,11 @@ on:
       version:
         description: 'Version the release file names; empty without one'
         value: ${{ jobs.check-release.outputs.version }}
+      project:
+        description: >-
+          Project the release file names; empty for a repository-wide
+          file or without one
+        value: ${{ jobs.check-release.outputs.project }}
       crate_name:
         description: 'Verified crate names, space-separated, publish order'
         value: ${{ jobs.crate-verify.outputs.crate_name }}
@@ -420,8 +427,10 @@ on:
         description: "'published', 'skipped' or 'failed'; empty unpublished"
         value: ${{ jobs.publish.outputs.publish_status }}
       tag:
-        description: 'Tag created on the merged commit; empty without one'
-        value: ${{ jobs.tag.outputs.tag }}
+        description: >-
+          Tag the release creates on the merged commit, or would create
+          on a dry run or without create_tag; empty without a release
+        value: ${{ jobs.check-release.outputs.tag }}
 
 permissions: {}
 
@@ -751,6 +760,8 @@ jobs:
       # explicit refs compare the tip with its first parent instead.
       # yamllint disable-line rule:line-length
       base: ${{ github.event_name == 'push' && inputs.gerrit_refspec == '' && inputs.ref == '' && (inputs.repository == '' || inputs.repository == github.repository) && github.event.before || '' }}
+      # A release file naming another project is not this call's.
+      path_prefix: ${{ inputs.path_prefix }}
       # A dry run publishes and tags nothing, so a taken tag is a
       # warning and the rehearsal carries on.
       tag_conflict: ${{ inputs.dry_run && 'warn' || 'fail' }}
@@ -1429,6 +1440,7 @@ jobs:
           packages: ${{ inputs.packages }}
           exclude: ${{ inputs.exclude }}
           toolchain: ${{ needs.rust-metadata.outputs.toolchain }}
+          # The publisher's version check, not the git tag's name.
           # yamllint disable-line rule:line-length
           release_tag: ${{ needs.check-release.outputs.has_release == 'true' && format('v{0}', needs.check-release.outputs.version) || '' }}
           # yamllint disable-line rule:line-length
@@ -1597,7 +1609,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPOSITORY: ${{ inputs.repository || github.repository }}
-          TAG: v${{ needs.check-release.outputs.version }}
+          TAG: ${{ needs.check-release.outputs.tag }}
           SHA: ${{ needs.check-release.outputs.sha }}
         run: |
           # Create the tag

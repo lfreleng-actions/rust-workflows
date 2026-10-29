@@ -259,6 +259,43 @@ commit it names, since the merged commit doesn't exist yet; the merge
 lane refuses one on another commit. A change without a release file
 passes with a note, so Model A projects lose nothing.
 
+#### More than one project in a repository
+
+A repository holding more than one Rust project calls each lane once per
+project, with that project's `path_prefix` and its own
+`artefact_suffix`. Two optional keys scope a release file to one of
+those calls and name its tag:
+
+```yaml
+# releases/cli-1.2.0.yaml
+project: crates/cli
+version: 1.2.0
+git_tag: cli-v1.2.0
+```
+
+- `project` names the directory of the project the file releases, as
+  the lane call's `path_prefix` names it. The lanes compare the two
+  after dropping any leading `./` and trailing `/`; `.` names the root
+  project. It must be a relative path inside the repository, as a
+  string, with no `..` component. A file without `project` applies to
+  every call, so every project must carry its version.
+- `git_tag` names the tag the merge creates, so projects can keep
+  separate tag namespaces. It uses letters, digits, `.`, `_`, `-` and
+  `/`, with no empty, `.`-led or `.lock`-ended component, and must end
+  with the file's version: `cli-v1.2.0`, `cli/1.2.0` and `1.2.0` all
+  qualify. Without it the tag is `v<version>`. The tag checks above
+  apply to this name, and both lanes report it in their `tag` output,
+  the merge lane on a dry run or with `create_tag: false` too.
+
+Each call checks every release file the change adds, so a malformed
+file fails every call, then reads the files naming its own project or
+none. More than one such file fails the call: add one release file
+per project per change. A file naming another project is not the
+call's release, and the call reports it in a notice. The lanes cannot
+know which calls exist, so a file whose `project` no lane call names
+never releases; that notice, on every call, is the signal a reviewer
+sees.
+
 ## Gerrit support
 
 The workflows are Gerrit-aware: when a caller sets `gerrit_refspec`
