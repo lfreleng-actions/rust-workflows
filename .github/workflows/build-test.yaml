@@ -8,13 +8,16 @@
 # job runs in parallel as an informational step. After the build, the
 # jobs in { } run in parallel; none gates another, so a change surfaces
 # every failure at once (-> denotes sequence):
-#   rust-metadata -> build -> { tests | audit | sbom -> grype | cbom }
+#   rust-metadata -> { check-release | build }
+#   build -> { tests | audit | sbom -> grype | cbom }
 #
 # rust-metadata resolves one exact toolchain for the run, the test
 # matrix and the runners matrix (docs/BRIEF.md Q3, Q6, D4). build and
 # tests run once per runner; tests also once per toolchain leg. audit,
 # sbom and grype run once: the lockfile they read is the same on every
-# platform.
+# platform. check-release reads any Model B release file the change
+# adds under releases/ exactly as the merge lane will once it merges,
+# so a file the merge lane would refuse fails review instead.
 #
 # Call this from a thin caller workflow; see examples/build-test/ for
 # a plain GitHub-native caller and a Gerrit-wrapped caller.
@@ -381,6 +384,14 @@ on:
         type: string
         default: ''
 
+    outputs:
+      has_release:
+        description: "'true' when the change adds a release file"
+        value: ${{ jobs.check-release.outputs.has_release }}
+      version:
+        description: 'Version the release file names; empty without one'
+        value: ${{ jobs.check-release.outputs.version }}
+
 permissions: {}
 
 jobs:
@@ -550,6 +561,51 @@ jobs:
       gerrit_branch: ${{ inputs.gerrit_branch }}
       gerrit_url: ${{ inputs.gerrit_url }}
       artefact_suffix: ${{ inputs.artefact_suffix }}
+
+  # A Model B release file the change adds under releases/, checked as
+  # the merge lane's check-release job will read it once the change
+  # merges: one regular YAML file, a final 'version: X.Y.Z', and every
+  # publishable crate rust-metadata lists carrying that version. The
+  # check reads the commit rust-metadata read, so the file and the
+  # crate versions come from one revision when 'ref' names a branch
+  # that moves. An existing v<version> tag is a warning here, whichever
+  # commit it names: the merged commit does not exist yet, so the tag
+  # names something else, and the merge lane refuses the release. A
+  # change without a release file passes with a note.
+  check-release:
+    name: 'Check for Release File'
+    needs: rust-metadata
+    permissions:
+      contents: read
+    uses: $/.github/workflows/release-check.yaml
+    with:
+      repository: ${{ inputs.repository }}
+      ref: ${{ needs.rust-metadata.outputs.sha }}
+      # Every commit the change adds, relative to the branch it targets:
+      # a pull request's base, or the commit a push replaced. Gerrit
+      # patch sets and explicit refs compare the checked-out commit
+      # with its first parent instead.
+      # yamllint disable rule:line-length
+      base: >-
+        ${{ (inputs.gerrit_refspec == '' && inputs.ref == ''
+          && (inputs.repository == '' || inputs.repository == github.repository))
+        && ((github.event_name == 'pull_request' && github.event.pull_request.base.sha)
+          || (github.event_name == 'push' && github.event.before))
+        || '' }}
+      # yamllint enable rule:line-length
+      # yamllint disable-line rule:line-length
+      publishable_packages: ${{ needs.rust-metadata.outputs.publishable_packages }}
+      tag_conflict: 'review'
+      harden_runner_egress: ${{ inputs.harden_runner_egress }}
+      harden_runner_allowlist: ${{ inputs.harden_runner_allowlist }}
+      # The patch set under test, as rust-metadata read it: a patch
+      # set is immutable, and Gerrit is not asked for an unmerged
+      # commit by SHA, which the checkout action's mirror-less path
+      # does not support and the servers are not known to serve.
+      gerrit_refspec: ${{ inputs.gerrit_refspec }}
+      gerrit_project: ${{ inputs.gerrit_project }}
+      gerrit_branch: ${{ inputs.gerrit_branch }}
+      gerrit_url: ${{ inputs.gerrit_url }}
 
   build:
     name: 'Build (${{ matrix.platform.arch }})'
