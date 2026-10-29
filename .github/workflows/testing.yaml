@@ -366,12 +366,14 @@ jobs:
   # YAML can't parse, a duplicate or missing version key, two YAML
   # documents, a value with a trailing newline, two files in one
   # change, a pre-release version, a release file renamed from the
-  # last one, a name
-  # outside the plain set, a version the crates don't carry (the
-  # fixture's merge commit read with the root crate selected), and a
-  # release file in an earlier commit of a batched change, which the
-  # base comparison finds and a tip-only one misses. The tag check runs
-  # the same way against a stub gh, across its three policies.
+  # last one, a name outside the plain set, a version the crates don't
+  # carry (the fixture's merge commit read with the root crate
+  # selected), a release file in an earlier commit of a batched change,
+  # which the base comparison finds and a tip-only one misses, and the
+  # 'project' and 'git_tag' keys: which call a project file applies
+  # to, normalisation, one file per project, and each refused value.
+  # The tag check runs the same way against a stub gh, across its
+  # three policies.
   release-check-cases:
     name: 'Release File Checks'
     runs-on: ubuntu-latest
@@ -424,12 +426,13 @@ jobs:
           pass() { echo "✅ $1"; }
           miss() { echo "::error::$1"; failed=1; }
 
-          # run <dir> <base> <publishable>: the script's exit code lands
-          # in rc, its output in log, and GITHUB_OUTPUT in a scratch file.
+          # run <dir> <base> <publishable> [<path_prefix>]: the script's
+          # exit code lands in rc, its output in log, and GITHUB_OUTPUT
+          # in a scratch file. The prefix defaults to '.', as the lanes'.
           export GITHUB_OUTPUT="$CASES/output"
           export GITHUB_STEP_SUMMARY="$CASES/summary"
           run() {
-            export BASE="$2" PUBLISHABLE="$3"
+            export BASE="$2" PUBLISHABLE="$3" PATH_PREFIX="${4:-.}"
             : > "$GITHUB_OUTPUT"
             : > "$GITHUB_STEP_SUMMARY"
             rc=0
@@ -456,6 +459,17 @@ jobs:
           expect_none() {
             if [ "$rc" -eq 0 ] \
               && grep -qx 'has_release=false' "$GITHUB_OUTPUT"; then
+              pass "$1"
+            else
+              miss "$1: exit $rc, output: $log; $(outputs)"
+            fi
+          }
+          # expect_output <name> <record>: a release whose GITHUB_OUTPUT
+          # carries the record, such as 'tag=v1.2.0'.
+          expect_output() {
+            if [ "$rc" -eq 0 ] \
+              && grep -qx 'has_release=true' "$GITHUB_OUTPUT" \
+              && grep -qxF -- "$2" "$GITHUB_OUTPUT"; then
               pass "$1"
             else
               miss "$1: exit $rc, output: $log; $(outputs)"
@@ -608,6 +622,129 @@ jobs:
             1.2.0 releases/1.2.0.yaml
           run "$dir" '' "$both"
           expect_none 'The tip alone misses it, so the base matters'
+
+          # Release files scoped to a project: 'project' names the
+          # path_prefix of the lane call the file releases.
+          dir="$(scratch project)"
+          commit "$dir" releases/a-1.2.0.yaml \
+            $'project: crates/a\nversion: 1.2.0'
+          run "$dir" '' "$both" crates/a
+          expect_release 'A project file is its project call release' \
+            1.2.0 releases/a-1.2.0.yaml
+          expect_output 'A project file reports its project' \
+            'project=crates/a'
+          expect_output 'A project file without git_tag tags v<version>' \
+            'tag=v1.2.0'
+          run "$dir" '' "$both" .
+          expect_none 'A project file is not the root call release'
+          if grep -qF -- '::notice::releases/a-1.2.0.yaml names project' \
+            <<< "$log" && grep -qF -- "crates/a, not this call's ." \
+            <<< "$log"; then
+            pass 'A project file names its project in a notice elsewhere'
+          else
+            miss "No notice names the other project: $log"
+          fi
+
+          dir="$(scratch normalised)"
+          commit "$dir" releases/a-1.2.0.yaml \
+            $'project: ./crates/a/\nversion: 1.2.0'
+          run "$dir" '' "$both" crates/a
+          expect_release 'A project with ./ and a trailing / matches' \
+            1.2.0 releases/a-1.2.0.yaml
+          expect_output 'The project is reported normalised' \
+            'project=crates/a'
+          run "$dir" '' "$both" ./crates/a/
+          expect_release 'A path_prefix with ./ and a trailing / matches' \
+            1.2.0 releases/a-1.2.0.yaml
+
+          dir="$(scratch projects)"
+          printf 'project: crates/a\nversion: 1.2.0\n' \
+            > "$dir/releases/a-1.2.0.yaml"
+          printf 'project: crates/b\nversion: 2.0.0\n' \
+            > "$dir/releases/b-2.0.0.yaml"
+          git -C "$dir" add -A
+          git -C "$dir" commit -q -m 'Add two project release files'
+          run "$dir" '' '' crates/a
+          expect_release 'Two projects: the a call reads the a file' \
+            1.2.0 releases/a-1.2.0.yaml
+          run "$dir" '' '' crates/b
+          expect_release 'Two projects: the b call reads the b file' \
+            2.0.0 releases/b-2.0.0.yaml
+          run "$dir" '' '' .
+          expect_none 'Two projects: the root call reads neither'
+
+          dir="$(scratch same-project)"
+          printf 'project: crates/a\nversion: 1.2.0\n' \
+            > "$dir/releases/a-1.2.0.yaml"
+          printf 'project: crates/a\nversion: 1.3.0\n' \
+            > "$dir/releases/a-1.3.0.yaml"
+          git -C "$dir" add -A
+          git -C "$dir" commit -q -m 'Add two release files for a'
+          run "$dir" '' '' crates/a
+          expect_fail 'Two release files for one project are refused' \
+            'release files for this project'
+
+          dir="$(scratch wide-and-project)"
+          printf 'version: 1.2.0\n' > "$dir/releases/1.2.0.yaml"
+          printf 'project: crates/a\nversion: 1.2.0\n' \
+            > "$dir/releases/a-1.2.0.yaml"
+          git -C "$dir" add -A
+          git -C "$dir" commit -q -m 'Add a wide and a project release file'
+          run "$dir" '' '' crates/a
+          expect_fail 'A wide and a project file for one call are refused' \
+            'release files for this project'
+
+          for value in 1 ../x /abs / // crates/../x "''"; do
+            dir="$(scratch bad-project)"
+            commit "$dir" releases/1.2.0.yaml \
+              "$(printf 'project: %s\nversion: 1.2.0' "$value")"
+            run "$dir" '' '' crates/a
+            expect_fail "A project of $value is refused" \
+              "needs 'project' to name a directory"
+          done
+
+          dir="$(scratch git-tag)"
+          commit "$dir" releases/cli-1.2.0.yaml \
+            $'project: crates/cli\nversion: 1.2.0\ngit_tag: cli-v1.2.0'
+          run "$dir" '' '' crates/cli
+          expect_output 'A git_tag names the release tag' 'tag=cli-v1.2.0'
+
+          dir="$(scratch git-tag-slash)"
+          commit "$dir" releases/cli-1.2.0.yaml \
+            $'version: 1.2.0\ngit_tag: cli/1.2.0'
+          run "$dir" '' ''
+          expect_output 'A git_tag may hold a /' 'tag=cli/1.2.0'
+
+          dir="$(scratch git-tag-version)"
+          commit "$dir" releases/cli-1.2.0.yaml \
+            $'version: 1.2.0\ngit_tag: cli-v1.3.0'
+          run "$dir" '' ''
+          expect_fail 'A git_tag for another version is refused' \
+            'does not end with its version 1.2.0'
+
+          for value in "'bad tag'" a//b .hidden/1.2.0 \
+            /1.2.0 x.lock/1.2.0 a..1.2.0 1; do
+            dir="$(scratch bad-git-tag)"
+            commit "$dir" releases/1.2.0.yaml \
+              "$(printf 'version: 1.2.0\ngit_tag: %s' "$value")"
+            run "$dir" '' ''
+            expect_fail "A git_tag of $value is refused" \
+              "needs 'git_tag' to be a tag name"
+          done
+
+          dir="$(scratch duplicate-project)"
+          commit "$dir" releases/1.2.0.yaml \
+            $'project: crates/a\n"project": crates/b\nversion: 1.2.0'
+          run "$dir" '' '' crates/a
+          expect_fail 'A duplicate project key is refused' \
+            "more than one top-level 'project' key"
+
+          # Every file is checked, whichever project it names.
+          dir="$(scratch other-malformed)"
+          commit "$dir" releases/b-1.2.yaml \
+            $'project: crates/b\nversion: 1.2'
+          run "$dir" '' '' crates/a
+          expect_fail "Another project's malformed file is refused" "$final"
 
           # The fixture's merge commit, which adds the workspace
           # variant's release file, read twice: as the verify lane does
@@ -1072,6 +1209,7 @@ jobs:
           RELEASE_PATH_HAS_RELEASE: ${{ needs.merge-release-dry-run.outputs.has_release }}
           # yamllint disable-line rule:line-length
           RELEASE_PATH_VERSION: ${{ needs.merge-release-dry-run.outputs.version }}
+          RELEASE_PATH_TAG: ${{ needs.merge-release-dry-run.outputs.tag }}
           # yamllint disable-line rule:line-length
           RELEASE_PATH_CRATES: ${{ needs.merge-release-dry-run.outputs.crate_name }}
         run: |
@@ -1188,6 +1326,12 @@ jobs:
             else
               got="'$RELEASE_PATH_HAS_RELEASE', '$RELEASE_PATH_VERSION'"
               miss "The merge release run reported has_release, version: $got"
+            fi
+            # A dry run creates no tag, but still names the one it would.
+            if [ "$RELEASE_PATH_TAG" = 'v0.1.0' ]; then
+              pass 'The merge release run named tag v0.1.0'
+            else
+              miss "The merge release run reported tag: '$RELEASE_PATH_TAG'"
             fi
             # crate-verify reports the crates it verified; the
             # publish = false member must not be among them.

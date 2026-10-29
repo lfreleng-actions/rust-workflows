@@ -268,8 +268,10 @@ build -> { tests | audit | sbom -> grype | cbom }
   `releases/`, through `release-check.yaml`, the workflow the merge
   lane's job of the same name runs (Q8), so verify predicts merge and
   the two can't drift, as the docker lanes check a release file before
-  merge. It checks out the commit `rust-metadata` read, so the file and
-  the crate versions come from one revision when `ref` names a branch
+  merge. It passes the lane's `path_prefix`, so it reads the release
+  files naming that project, or none, and notes the rest. It checks
+  out the commit `rust-metadata` read, so the file and the crate
+  versions come from one revision when `ref` names a branch
   that moves; a Gerrit change refspec names an immutable patch set, so
   that path fetches the refspec itself rather than ask Gerrit for an
   unmerged commit by SHA, and any other Gerrit refspec fetches that
@@ -458,14 +460,24 @@ resolve-commit -> check-release -> rust-metadata -> build
 - A release happens when the merged change adds one YAML file directly
   under `releases/`, a regular file holding one mapping with a single
   top-level `version: X.Y.Z`: a final release with no pre-release or
-  build part, as Model A requires of its tags. On a GitHub push,
-  `check-release` looks at every commit the push added, so a batched
+  build part, as Model A requires of its tags. Two optional keys from
+  the Linux Foundation release-file schema serve a repository that
+  calls the lane once per project: `project` names the `path_prefix`
+  of the call the file releases (compared after dropping a leading
+  `./` and a trailing `/`), and `git_tag` names the tag, which must
+  end with the version. A file without `project` applies to every
+  call. Each call validates every release file the change adds, then
+  reads those naming its project or none, and refuses more than one.
+  On a GitHub push, `check-release` looks at every commit the push added, so a batched
   push or a rebase merge can't hide a release file in an earlier
   commit; on a Gerrit dispatch it compares the merged commit with its
   first parent. `crate-verify`
   passes `v<version>` as the publisher's `release_tag`, which requires
   every crate version to equal it; `publish` uploads; and the `tag` job
-  then creates `v<version>` on the merged commit.
+  then creates the resolved tag on the merged commit: the file's
+  `git_tag`, or `v<version>` without one. The publisher's
+  `release_tag` is its version check, not the git tag's name, so it
+  stays `v<version>` either way.
 - `check-release` records the merged commit once, and every later
   job checks out that commit on both checkout paths. The version
   check, the build, the gates and the upload then all act on one
@@ -643,7 +655,9 @@ writes the database cache. Both add `semver_checks` (`false`),
 `tag_*` policy inputs, and exposes `tag`, `crate_name`,
 `crate_version`, `publish_status` and `release_url`. The merge workflow
 adds `create_tag` (`true`) and exposes `has_release`, `version`,
-`crate_name`, `crate_sha256`, `publish_status` and `tag`.
+`project`, `crate_name`, `crate_sha256`, `publish_status` and `tag`,
+the resolved tag the release creates, named on a dry run or with
+`create_tag: false` too.
 
 **Not exposed** (kept at action defaults, added on demand): tool
 versions (`nextest_version`, `llvm_cov_version`,
@@ -777,11 +791,17 @@ changes once upstream support exists.
     without it), a version the crates don't carry (the fixture
     commit read with the root crate selected), and a release file in
     an earlier commit of a batched change, which the base comparison
-    finds and a comparison with the first parent alone misses; and the
-    tag check's script against a stub `gh`, across `fail`, `warn` and
-    `review` for a free tag, a tag on the commit, one on another
-    commit, an annotated tag, an unreadable tag object and a failed
-    lookup;
+    finds and a comparison with the first parent alone misses; the
+    `project` key read by its own call, by another call (with a
+    notice), normalised, and with two projects in one change; two
+    files for one project, or a repository-wide file beside a project
+    one, refused; a `project` that isn't a relative directory string;
+    a `git_tag` resolved, one for another version, and one outside
+    the tag rules, refused; and a malformed file naming another
+    project, refused; and the tag check's script against a stub
+    `gh`, across `fail`, `warn` and `review` for a free tag, a tag on
+    the commit, one on another commit, an annotated tag, an unreadable
+    tag object and a failed lookup;
   - the release lane with `dry_run: true` on the signed tag `v0.1.1`;
   - the merge lane with `dry_run: true`, on a commit that adds no
     release file, and again on the fixture's merge commit that adds
@@ -798,7 +818,8 @@ changes once upstream support exists.
     platforms' binaries, the MSRV leg and the packaged crates. It also
     checks the verify lane's release-file outputs and the merge calls'
     outputs: no release on the first, and on
-    the second `has_release: true`, version `0.1.0`, and both
+    the second `has_release: true`, version `0.1.0`, tag `v0.1.0`
+    though the dry run creates none, and both
     publishable members, without the `publish = false` one, in
     `crate_name` from crate verification.
 - `testing.yaml` does not exercise the publish path: nobody can take a

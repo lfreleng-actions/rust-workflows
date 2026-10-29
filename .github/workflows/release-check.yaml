@@ -5,21 +5,25 @@
 # Shared release-file check for the lanes in this repository.
 #
 # A Model B release is a change that adds one YAML file directly under
-# releases/ carrying 'version: X.Y.Z' (docs/BRIEF.md Q8). merge.yaml
-# reads the file once the change has merged, and build-test.yaml reads
-# it on the pull request or Gerrit patch set that adds it, through this
-# one workflow, so what verify accepts, merge accepts too, and a file
-# merge would refuse fails review instead. Called through the
-# self-repository form ('$/'), as rust-metadata.yaml is. It is an
-# internal building block: projects call one of the lanes, never this
-# file.
+# releases/ carrying 'version: X.Y.Z' (docs/BRIEF.md Q8), and
+# optionally 'project:', the path_prefix of the lane call it releases,
+# and 'git_tag:', the tag the merge creates. merge.yaml reads the file
+# once the change has merged, and build-test.yaml reads it on the pull
+# request or Gerrit patch set that adds it, through this one workflow,
+# so what verify accepts, merge accepts too, and a file merge would
+# refuse fails review instead. Called through the self-repository form
+# ('$/'), as rust-metadata.yaml is. It is an internal building block:
+# projects call one of the lanes, never this file.
 #
-# The job reports the release file's version, and the commit it read,
-# and fails on a malformed file, several files in one change, a
+# The job reports the release file's version, project and tag, and the
+# commit it read. It validates every release file the change adds,
+# then keeps those naming no project or this call's path_prefix, and
+# fails on a malformed file, several kept files in one change, a
 # version that is not a final X.Y.Z, or a version the publishable
-# crates don't carry. When v<version> already exists it fails or
-# warns, as the caller chose: a review commit is never the one that
-# merges, so the verify lane treats any existing tag as a warning.
+# crates don't carry. When the tag (git_tag, or v<version> without
+# one) already exists it fails or warns, as the caller chose: a review
+# commit is never the one that merges, so the verify lane treats any
+# existing tag as a warning.
 name: '[R] Rust Release Check'
 
 # yamllint disable-line rule:truthy
@@ -46,6 +50,14 @@ on:
         required: false
         type: string
         default: ''
+      path_prefix:
+        description: >-
+          The lanes' path_prefix: the directory of the project the
+          calling lane acts on. A release file naming another project
+          is not this call's release.
+        required: false
+        type: string
+        default: '.'
       publishable_packages:
         description: >-
           JSON array of {name, version} objects, as rust-metadata lists
@@ -56,7 +68,8 @@ on:
         default: ''
       tag_conflict:
         description: >-
-          What to do when v<version> already names another commit:
+          What to do when the release tag (git_tag, or v<version>)
+          already names another commit:
           'fail' stops the run, 'warn' reports and carries on. 'review'
           also reports a tag that names the checked-out commit itself,
           since the commit under review is never the one that merges,
@@ -107,6 +120,14 @@ on:
       file:
         description: 'Path of the release file; empty without one'
         value: ${{ jobs.check-release.outputs.file }}
+      project:
+        description: >-
+          Project the release file names; empty for a repository-wide
+          file or without one
+        value: ${{ jobs.check-release.outputs.project }}
+      tag:
+        description: 'Tag the release creates; empty without one'
+        value: ${{ jobs.check-release.outputs.tag }}
       sha:
         description: 'Commit the check read'
         value: ${{ jobs.check-release.outputs.sha }}
@@ -127,6 +148,8 @@ jobs:
       has_release: ${{ steps.detect.outputs.has_release }}
       version: ${{ steps.detect.outputs.version }}
       file: ${{ steps.detect.outputs.file }}
+      project: ${{ steps.detect.outputs.project }}
+      tag: ${{ steps.detect.outputs.tag }}
       sha: ${{ steps.detect.outputs.sha }}
     steps:
       - name: 'Load egress allow-list'
@@ -202,12 +225,36 @@ jobs:
         env:
           BASE: ${{ inputs.base }}
           PUBLISHABLE: ${{ inputs.publishable_packages }}
+          PATH_PREFIX: ${{ inputs.path_prefix }}
         run: |
           # Detect a release file in the change
           set -euo pipefail
           fail() { echo "::error::$*"; exit 1; }
+          no_release() {
+            {
+              echo "has_release=false"
+              echo "version="
+              echo "file="
+              echo "project="
+              echo "tag="
+            } >> "$GITHUB_OUTPUT"
+            exit 0
+          }
+          # A project path as the lanes compare it: without any leading
+          # './' or trailing '/', and '.' for the repository root.
+          normalise() {
+            local path="$1"
+            while [[ "$path" == ./* ]]; do path="${path#./}"; done
+            while [[ "$path" == */ ]]; do path="${path%/}"; done
+            printf '%s' "${path:-.}"
+          }
           sha="$(git rev-parse HEAD)"
           echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          # The prefix lands in a notice, one workflow command per line.
+          if [[ "$PATH_PREFIX" =~ [[:cntrl:]] ]]; then
+            fail "path_prefix holds a control character"
+          fi
+          prefix="$(normalise "${PATH_PREFIX:-.}")"
           # Release files are YAML files directly under releases/. Paths
           # are read NUL-delimited: git would otherwise quote one holding
           # a space, a quote or a non-ASCII byte.
@@ -245,65 +292,136 @@ jobs:
           fi
           if [ "${#files[@]}" -eq 0 ]; then
             echo "No release file in the change"
-            {
-              echo "has_release=false"
-              echo "version="
-              echo "file="
-            } >> "$GITHUB_OUTPUT"
-            exit 0
+            no_release
           fi
-          # One release per change: several files would make the
-          # version an arbitrary choice.
-          if [ "${#files[@]}" -gt 1 ]; then
-            fail "The change adds ${#files[@]} release files;" \
-              "add one per change"
-          fi
-          file="${files[0]}"
-          # The name lands in GITHUB_OUTPUT, one record per line, where a
-          # newline in it could forge the recorded commit; keep names to
-          # a plain set.
-          [[ "$file" =~ ^releases/[A-Za-z0-9._-]+\.ya?ml$ ]] \
-            || fail "Release file names use letters, digits, '.', '_'" \
-              "and '-' alone"
-          # A regular file, in the commit and on disk: a symlink could
-          # request a release with content from outside the file.
-          mode="$(git ls-tree HEAD -- "$file" | cut -d' ' -f1)"
-          case "$mode" in
-            100644 | 100755) ;;
-            *) fail "$file must be a regular file" ;;
-          esac
-          if [ ! -f "$file" ] || [ -L "$file" ]; then
-            fail "$file must be a regular file"
-          fi
-          # One YAML document holding a mapping with exactly one
-          # top-level 'version' key, read by a YAML parser (yq ships on
-          # the runner image): a file YAML can't parse, a second
-          # document, a duplicate key, or a value such as 1.2.0#rc,
-          # which YAML reads as one scalar since '#' opens a comment
-          # only after a space, fails here rather than reading as
-          # something else. The value must be a final X.Y.Z.
           yaml_errors="$RUNNER_TEMP/release-yaml.err"
-          if ! documents="$(yq eval-all '[.] | length' "$file" \
-              2> "$yaml_errors")"; then
-            fail "$file is not valid YAML: $(head -c 300 "$yaml_errors")"
-          fi
-          [ "$documents" -eq 1 ] \
-            || fail "$file holds $documents YAML documents; one is expected"
-          yq -e 'tag == "!!map"' "$file" > /dev/null 2>&1 \
-            || fail "$file must be a YAML mapping"
-          keys="$(yq 'to_entries | map(select(.key == "version")) | length' \
-            "$file")"
-          [ "$keys" -eq 1 ] \
-            || fail "$file needs exactly one top-level 'version' key"
-          # The parser tests the scalar itself, so a quoted trailing
-          # newline, which a shell substitution would strip, fails too.
           number='^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$'
-          NUMBER="$number" yq -e \
-            '.version | (tag == "!!str" and test(strenv(NUMBER)))' \
-            "$file" > /dev/null 2>&1 \
-            || fail "$file needs 'version: X.Y.Z', a final release"
-          version="$(yq '.version' "$file")"
-          echo "Release $version from $file"
+          # A tag name: a plain character set, and no empty, '.'-led or
+          # '.lock'-ended path component, nor '..', which git refuses.
+          export TAG_CHARS='^[A-Za-z0-9._/-]+$'
+          export TAG_EMPTY='(^|/)(/|$)'
+          export TAG_DOT='(^|/)[.]'
+          export TAG_LOCK='[.]lock(/|$)'
+          export TAG_DOTS='[.][.]'
+          # Every file is checked, whichever project it names, so a
+          # malformed file fails every call that sees it; then only the
+          # files naming no project, or this call's, are its release.
+          selected=()
+          for file in "${files[@]}"; do
+            # The name lands in GITHUB_OUTPUT, one record per line,
+            # where a newline in it could forge the recorded commit;
+            # keep names to a plain set.
+            [[ "$file" =~ ^releases/[A-Za-z0-9._-]+\.ya?ml$ ]] \
+              || fail "Release file names use letters, digits, '.', '_'" \
+                "and '-' alone"
+            # A regular file, in the commit and on disk: a symlink could
+            # request a release with content from outside the file.
+            mode="$(git ls-tree HEAD -- "$file" | cut -d' ' -f1)"
+            case "$mode" in
+              100644 | 100755) ;;
+              *) fail "$file must be a regular file" ;;
+            esac
+            if [ ! -f "$file" ] || [ -L "$file" ]; then
+              fail "$file must be a regular file"
+            fi
+            # One YAML document holding a mapping with exactly one
+            # top-level 'version' key, read by a YAML parser (yq ships
+            # on the runner image): a file YAML can't parse, a second
+            # document, a duplicate key, or a value such as 1.2.0#rc,
+            # which YAML reads as one scalar since '#' opens a comment
+            # only after a space, fails here rather than reading as
+            # something else. The value must be a final X.Y.Z.
+            if ! documents="$(yq eval-all '[.] | length' "$file" \
+                2> "$yaml_errors")"; then
+              fail "$file is not valid YAML: $(head -c 300 "$yaml_errors")"
+            fi
+            [ "$documents" -eq 1 ] \
+              || fail "$file holds $documents YAML documents; one is expected"
+            yq -e 'tag == "!!map"' "$file" > /dev/null 2>&1 \
+              || fail "$file must be a YAML mapping"
+            keys="$(yq 'to_entries | map(select(.key == "version"))
+              | length' "$file")"
+            [ "$keys" -eq 1 ] \
+              || fail "$file needs exactly one top-level 'version' key"
+            # The parser tests the scalar itself, so a quoted trailing
+            # newline, which a shell substitution would strip, fails too.
+            NUMBER="$number" yq -e \
+              '.version | (tag == "!!str" and test(strenv(NUMBER)))' \
+              "$file" > /dev/null 2>&1 \
+              || fail "$file needs 'version: X.Y.Z', a final release"
+            version="$(yq '.version' "$file")"
+            # An optional 'project': the path_prefix of the lane call
+            # the file releases. Without one, the file applies to every
+            # call, as a repository-wide release.
+            keys="$(yq 'to_entries | map(select(.key == "project"))
+              | length' "$file")"
+            [ "$keys" -le 1 ] \
+              || fail "$file holds more than one top-level 'project' key"
+            project=''
+            if [ "$keys" -eq 1 ]; then
+              yq -e '.project | (tag == "!!str" and . != ""
+                and (test("[[:cntrl:]]") | not))' \
+                "$file" > /dev/null 2>&1 \
+                || fail "$file needs 'project' to name a directory" \
+                  "relative to the repository root"
+              # A leading '/' is tested on the raw value: normalising
+              # '/' or '//' would leave the root's '.'.
+              project="$(yq '.project' "$file")"
+              [[ "$project" == /* ]] || project="$(normalise "$project")"
+              if [[ "$project" == /* ]] || [[ "/$project/" == */../* ]]
+              then
+                fail "$file needs 'project' to name a directory" \
+                  "relative to the repository root"
+              fi
+            fi
+            # An optional 'git_tag': the tag the merge creates, which
+            # ends with the version so a tag always names its release.
+            keys="$(yq 'to_entries | map(select(.key == "git_tag"))
+              | length' "$file")"
+            [ "$keys" -le 1 ] \
+              || fail "$file holds more than one top-level 'git_tag' key"
+            tag="v$version"
+            if [ "$keys" -eq 1 ]; then
+              yq -e '.git_tag | (tag == "!!str"
+                and test(strenv(TAG_CHARS))
+                and (test(strenv(TAG_EMPTY)) | not)
+                and (test(strenv(TAG_DOT)) | not)
+                and (test(strenv(TAG_LOCK)) | not)
+                and (test(strenv(TAG_DOTS)) | not))' \
+                "$file" > /dev/null 2>&1 \
+                || fail "$file needs 'git_tag' to be a tag name of" \
+                  "letters, digits, '.', '_', '-' and '/', with no" \
+                  "empty, '.'-led or '.lock'-ended component"
+              tag="$(yq '.git_tag' "$file")"
+              [[ "$tag" == *"$version" ]] \
+                || fail "$file names git_tag $tag, which does not end" \
+                  "with its version $version"
+            fi
+            if [ -z "$project" ] || [ "$project" = "$prefix" ]; then
+              selected+=("$file")
+              release_version="$version"
+              release_project="$project"
+              release_tag="$tag"
+            else
+              echo "::notice::$file names project $project," \
+                "not this call's $prefix"
+            fi
+          done
+          if [ "${#selected[@]}" -eq 0 ]; then
+            echo "No release file for project $prefix in the change"
+            no_release
+          fi
+          # One release per project per change: several files would
+          # make the version an arbitrary choice.
+          if [ "${#selected[@]}" -gt 1 ]; then
+            fail "The change adds ${#selected[@]} release files for this" \
+              "project; add one per change"
+          fi
+          file="${selected[0]}"
+          version="$release_version"
+          project="$release_project"
+          tag="$release_tag"
+          echo "Release $version from $file, tagged $tag"
           # Every publishable crate must carry the version, as
           # crate-verify requires of a release merge; name each one
           # that doesn't, so the fix is one edit.
@@ -330,8 +448,10 @@ jobs:
             echo "has_release=true"
             echo "version=$version"
             echo "file=$file"
+            echo "project=$project"
+            echo "tag=$tag"
           } >> "$GITHUB_OUTPUT"
-          echo "## 🦀 Release $version requested by \`$file\`" \
+          echo "## 🦀 Release $version ($tag) requested by \`$file\`" \
             >> "$GITHUB_STEP_SUMMARY"
 
       # A crates.io version is permanent, so a release tag that already
@@ -348,7 +468,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPOSITORY: ${{ inputs.repository || github.repository }}
-          TAG: v${{ steps.detect.outputs.version }}
+          TAG: ${{ steps.detect.outputs.tag }}
           SHA: ${{ steps.detect.outputs.sha }}
           TAG_CONFLICT: ${{ inputs.tag_conflict }}
         run: |

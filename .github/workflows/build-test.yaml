@@ -394,6 +394,14 @@ on:
       version:
         description: 'Version the release file names; empty without one'
         value: ${{ jobs.check-release.outputs.version }}
+      project:
+        description: >-
+          Project the release file names; empty for a repository-wide
+          file or without one
+        value: ${{ jobs.check-release.outputs.project }}
+      tag:
+        description: 'Tag the release would create; empty without one'
+        value: ${{ jobs.check-release.outputs.tag }}
 
 permissions: {}
 
@@ -568,10 +576,11 @@ jobs:
   # A Model B release file the change adds under releases/, checked as
   # the merge lane's check-release job will read it once the change
   # merges: one regular YAML file, a final 'version: X.Y.Z', and every
-  # publishable crate rust-metadata lists carrying that version. The
+  # publishable crate rust-metadata lists carrying that version. Only
+  # files naming no project, or this call's path_prefix, apply. The
   # check reads the commit rust-metadata read, so the file and the
   # crate versions come from one revision when 'ref' names a branch
-  # that moves. An existing v<version> tag is a warning here, whichever
+  # that moves. An existing release tag is a warning here, whichever
   # commit it names: the merged commit does not exist yet, so the tag
   # names something else, and the merge lane refuses the release. A
   # change without a release file passes with a note.
@@ -596,6 +605,8 @@ jobs:
           || (github.event_name == 'push' && github.event.before))
         || '' }}
       # yamllint enable rule:line-length
+      # A release file naming another project is not this call's.
+      path_prefix: ${{ inputs.path_prefix }}
       # yamllint disable-line rule:line-length
       publishable_packages: ${{ needs.rust-metadata.outputs.publishable_packages }}
       tag_conflict: 'review'
