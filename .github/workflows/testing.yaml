@@ -325,6 +325,41 @@ jobs:
       sbom_enabled: false
       artefact_suffix: '-release-file'
 
+  # The verify lane on a branch and on a tag rather than a SHA. Every
+  # job after rust-metadata checks out the commit rust-metadata read and
+  # fails if it differs; a branch comes back as a local branch at that
+  # commit, a tag as the tag itself. The fixture's main can move, so the
+  # stages that read the advisory databases stay off: a new advisory
+  # must not turn this red. A pull request's merge commit is a plain
+  # SHA to the lane, which the verify job above covers. ref-pin-cases
+  # below asserts the recorded ref and the restored branch or tag, and
+  # the refusal of a ref that moved, which a lane run can't stage.
+  verify-refs:
+    name: 'Verify (${{ matrix.name }})'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: 'branch ref'
+            ref: 'main'
+            suffix: '-ref-branch'
+          - name: 'tag ref'
+            ref: 'v0.1.1'
+            suffix: '-ref-tag'
+    # Granted for the same reason as verify-release-file above.
+    permissions:
+      contents: read
+      pull-requests: read  # repository-metadata-action queries PR data
+      issues: read  # grype-scan-action reads cve-bypass issues
+    uses: $/.github/workflows/build-test.yaml
+    with:
+      repository: 'lfreleng-actions/test-rust-project'
+      ref: ${{ matrix.ref }}
+      test_matrix: 'project'
+      audit_enabled: false
+      sbom_enabled: false
+      artefact_suffix: ${{ matrix.suffix }}
+
   # The release-file check's own script, run outside a lane against
   # scratch repositories and the fixture, so every refusal the lanes
   # make is exercised without a red lane run: a malformed file, a file
@@ -686,6 +721,218 @@ jobs:
             "::warning::$TAG already exists, on the commit under review"
           expect review annotated 0 \
             "::warning::$TAG already exists, on the commit under review"
+          exit "$failed"
+
+  # The verify lane's commit record and pin scripts, run outside a lane
+  # against scratch repositories, as release-check-cases runs the
+  # release check's: the ref rust-metadata records for a branch, a tag
+  # named or pushed, an annotated tag, a pull request, a plain SHA, a
+  # tag on another commit and a Gerrit checkout; then the pin on a
+  # branch that moved after rust-metadata read it, which must come
+  # back as the branch at the recorded commit, a tag, which must stay
+  # findable, and a tag or branch checkout that moved, which must fail.
+  ref-pin-cases:
+    name: 'Ref Pin Checks'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    timeout-minutes: 10
+    steps:
+      - name: 'Harden runner'
+        # yamllint disable-line rule:line-length
+        uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43  # v2.22.3
+        with:
+          egress-policy: 'audit'
+
+      - name: 'Checkout repository'
+        # yamllint disable-line rule:line-length
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      # Every job after rust-metadata carries its own copy of the pin
+      # step, so the copies must match before one stands for all five.
+      - name: 'Extract the record and pin scripts'
+        shell: bash
+        env:
+          RECORD: ${{ runner.temp }}/record.sh
+          PIN: ${{ runner.temp }}/pin.sh
+        run: |
+          # Extract the record and pin scripts
+          set -euo pipefail
+          yq '.jobs.rust-metadata.steps[] | select(.id == "commit") | .run' \
+            .github/workflows/rust-metadata.yaml > "$RECORD"
+          for job in build tests audit sbom cbom; do
+            yq ".jobs.$job.steps[]
+              | select(.name == \"Pin the commit rust-metadata read\")
+              | .run" .github/workflows/build-test.yaml > "$PIN.$job"
+            grep -q '^set -euo pipefail$' "$PIN.$job" \
+              || { echo "::error::$job has no pin step"; exit 1; }
+            if ! cmp -s "$PIN.build" "$PIN.$job"; then
+              echo "::error::$job's pin step differs from build's"
+              exit 1
+            fi
+          done
+          cp "$PIN.build" "$PIN"
+          for script in "$RECORD" "$PIN"; do
+            grep -q '^set -euo pipefail$' "$script"
+            bash -n "$script"
+            wc -l "$script"
+          done
+
+      - name: 'Run the cases'
+        shell: bash
+        env:
+          RECORD: ${{ runner.temp }}/record.sh
+          PIN: ${{ runner.temp }}/pin.sh
+          CASES: ${{ runner.temp }}/pin-cases
+          GIT_AUTHOR_NAME: 'Ref Pin'
+          GIT_AUTHOR_EMAIL: 'ref-pin@example.invalid'
+          GIT_COMMITTER_NAME: 'Ref Pin'
+          GIT_COMMITTER_EMAIL: 'ref-pin@example.invalid'
+        run: |
+          # Run the cases
+          set -euo pipefail
+          failed=0
+          pass() { echo "✅ $1"; }
+          miss() { echo "::error::$1"; failed=1; }
+          export GITHUB_OUTPUT="$CASES/output"
+          mkdir -p "$CASES"
+
+          # scratch <name>: commit A on main, lightweight tag v1 on A,
+          # then commit B on main and annotated tag v2 on B, so main has
+          # moved on from A as a branch does mid-run.
+          scratch() {
+            local dir="$CASES/$1"
+            rm -rf "$dir"
+            git init -q -b main "$dir"
+            git -C "$dir" commit -q --allow-empty -m 'A'
+            git -C "$dir" tag v1
+            git -C "$dir" commit -q --allow-empty -m 'B'
+            git -C "$dir" tag -a -m 'Release 2' v2
+            echo "$dir"
+          }
+
+          # record <dir> <requested> [<gerrit refspec>]: rust-metadata's
+          # record step, as it runs after the checkout left <dir> as is.
+          record() {
+            : > "$GITHUB_OUTPUT"
+            rc=0
+            log="$(cd "$1" && REQUESTED="$2" GERRIT_REFSPEC="${3:-}" \
+              bash "$RECORD" 2>&1)" || rc=$?
+          }
+          expect_record() {
+            if [ "$rc" -eq 0 ] \
+              && grep -qx "sha=$2" "$GITHUB_OUTPUT" \
+              && grep -qx "ref=$3" "$GITHUB_OUTPUT" \
+              && [ "$(grep -c . "$GITHUB_OUTPUT")" -eq 2 ]; then
+              pass "$1"
+            else
+              miss "$1: exit $rc, output: $log;" \
+                "$(tr '\n' ' ' < "$GITHUB_OUTPUT")"
+            fi
+          }
+
+          # pin <dir> <sha> <ref>: a later job's pin step, run on the
+          # commit its checkout left in <dir>.
+          pin() {
+            rc=0
+            log="$(cd "$1" && SHA="$2" REF="$3" bash "$PIN" 2>&1)" || rc=$?
+          }
+          expect_pin_fail() {
+            if [ "$rc" -ne 0 ] && grep -qF -- "$2" <<< "$log"; then
+              pass "$1"
+            else
+              miss "$1: exit $rc, output: $log"
+            fi
+          }
+
+          dir="$(scratch record)"
+          a="$(git -C "$dir" rev-parse v1)"
+          b="$(git -C "$dir" rev-parse main)"
+
+          # actions/checkout leaves a branch ref as a local branch.
+          record "$dir" 'main'
+          expect_record 'A branch ref records the branch' \
+            "$b" 'refs/heads/main'
+
+          # A tag, or any SHA, leaves the checkout detached.
+          git -C "$dir" checkout -q --detach v1
+          record "$dir" 'v1'
+          expect_record 'A tag ref records the tag' "$a" 'refs/tags/v1'
+          record "$dir" 'refs/tags/v1'
+          expect_record 'A tag push records the tag' "$a" 'refs/tags/v1'
+          record "$dir" 'v2'
+          expect_record 'A tag naming another commit records none' "$a" ''
+          record "$dir" 'refs/pull/7/merge'
+          expect_record 'A pull request records none' "$a" ''
+          record "$dir" "$a"
+          expect_record 'A plain SHA records none' "$a" ''
+          record "$dir" 'bad..name'
+          expect_record 'A ref git cannot name records none' "$a" ''
+
+          git -C "$dir" checkout -q --detach v2
+          record "$dir" 'v2'
+          expect_record 'An annotated tag records the tag' \
+            "$b" 'refs/tags/v2'
+
+          git -C "$dir" checkout -q main
+          record "$dir" 'main' 'refs/changes/01/1/1'
+          expect_record 'A Gerrit checkout records none' "$b" ''
+
+          # rust-metadata read main at A; main then moved to B, and the
+          # later job checked out A by SHA, detached.
+          dir="$(scratch branch)"
+          a="$(git -C "$dir" rev-parse v1)"
+          git -C "$dir" checkout -q --detach "$a"
+          pin "$dir" "$a" 'refs/heads/main'
+          if [ "$rc" -eq 0 ] \
+            && [ "$(git -C "$dir" symbolic-ref --short HEAD)" = main ] \
+            && [ "$(git -C "$dir" rev-parse HEAD)" = "$a" ]; then
+            pass 'A moved branch comes back as the branch at the commit read'
+          else
+            miss "A moved branch: exit $rc, output: $log"
+          fi
+
+          # A checkout that landed on the moved branch's new tip fails.
+          dir="$(scratch tip)"
+          a="$(git -C "$dir" rev-parse v1)"
+          pin "$dir" "$a" 'refs/heads/main'
+          expect_pin_fail 'A checkout of the moved tip is refused' \
+            'moved during the run'
+
+          # A tag is checked out by name and stays findable.
+          dir="$(scratch tag)"
+          a="$(git -C "$dir" rev-parse v1)"
+          git -C "$dir" checkout -q --detach v1
+          pin "$dir" "$a" 'refs/tags/v1'
+          if [ "$rc" -eq 0 ] \
+            && [ "$(git -C "$dir" describe --tags --exact-match)" = v1 ]; then
+            pass 'A tag stays findable with git describe'
+          else
+            miss "A tag: exit $rc, output: $log"
+          fi
+
+          # The tag moved to B after rust-metadata read it at A.
+          git -C "$dir" tag -f v1 'v2^{commit}' > /dev/null
+          git -C "$dir" checkout -q --detach v1
+          pin "$dir" "$a" 'refs/tags/v1'
+          expect_pin_fail 'A moved tag is refused' 'moved during the run'
+
+          # A pull request's merge commit or a plain SHA stays detached.
+          git -C "$dir" checkout -q --detach "$a"
+          pin "$dir" "$a" ''
+          if [ "$rc" -eq 0 ] \
+            && ! git -C "$dir" symbolic-ref -q HEAD > /dev/null \
+            && grep -qF "At commit $a" <<< "$log"; then
+            pass 'A commit without a ref stays detached'
+          else
+            miss "A commit without a ref: exit $rc, output: $log"
+          fi
+
+          pin "$dir" '' ''
+          expect_pin_fail 'An empty recorded commit is refused' \
+            "but rust-metadata read ''"
           exit "$failed"
 
   # The release lane, rehearsed on the signed tag that published crate

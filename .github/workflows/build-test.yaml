@@ -15,9 +15,12 @@
 # matrix and the runners matrix (docs/BRIEF.md Q3, Q6, D4). build and
 # tests run once per runner; tests also once per toolchain leg. audit,
 # sbom and grype run once: the lockfile they read is the same on every
-# platform. check-release reads any Model B release file the change
-# adds under releases/ exactly as the merge lane will once it merges,
-# so a file the merge lane would refuse fails review instead.
+# platform. Every job after rust-metadata checks out the commit it
+# read, or the immutable Gerrit patch set it read, so a branch 'ref'
+# or refspec that moves mid-run can't split the run across two
+# revisions. check-release reads any Model B release file
+# the change adds under releases/ exactly as the merge lane will once
+# it merges, so a file the merge lane would refuse fails review instead.
 #
 # Call this from a thin caller workflow; see examples/build-test/ for
 # a plain GitHub-native caller and a Gerrit-wrapped caller.
@@ -598,11 +601,18 @@ jobs:
       tag_conflict: 'review'
       harden_runner_egress: ${{ inputs.harden_runner_egress }}
       harden_runner_allowlist: ${{ inputs.harden_runner_allowlist }}
-      # The patch set under test, as rust-metadata read it: a patch
-      # set is immutable, and Gerrit is not asked for an unmerged
-      # commit by SHA, which the checkout action's mirror-less path
-      # does not support and the servers are not known to serve.
-      gerrit_refspec: ${{ inputs.gerrit_refspec }}
+      # A change refspec is the patch set under test, as rust-metadata
+      # read it: a patch set is immutable, and Gerrit is not asked for
+      # an unmerged commit by SHA, which the checkout action's
+      # mirror-less path does not support and the servers are not
+      # known to serve. Any other refspec names a merged commit that
+      # can move, so the check fetches rust-metadata's commit by SHA,
+      # as the later jobs and the merge lane do.
+      gerrit_refspec: >-
+        ${{ inputs.gerrit_refspec != ''
+          && !startsWith(inputs.gerrit_refspec, 'refs/changes/')
+          && needs.rust-metadata.outputs.sha
+          || inputs.gerrit_refspec }}
       gerrit_project: ${{ inputs.gerrit_project }}
       gerrit_branch: ${{ inputs.gerrit_branch }}
       gerrit_url: ${{ inputs.gerrit_url }}
@@ -634,12 +644,23 @@ jobs:
           allowed-endpoints: >
             ${{ env.CONNECTION_ALLOW_LIST }}
 
+      # Every job after rust-metadata checks out the commit it read
+      # (docs/BRIEF.md Q6), so a branch 'ref' that moves mid-run can't
+      # give two jobs different source. A Gerrit change refspec names
+      # an immutable patch set and is fetched as given, as check-release
+      # does; any other Gerrit refspec names a merged commit, which the
+      # checkout action fetches by SHA, as in the merge lane. On the
+      # GitHub path a tag is checked out by name, so the tag exists in
+      # the checkout, and the pin step fails the job if it has moved;
+      # a branch is restored as a local branch at the commit, so a
+      # build script still finds one.
       - name: 'Checkout Gerrit change'
         if: inputs.gerrit_refspec != ''
         # yamllint disable-line rule:line-length
         uses: lfreleng-actions/checkout-gerrit-change-action@35e98c8043ec411611e464e296bcfb441a5c5093  # v1.1.2
         with:
-          gerrit-refspec: ${{ inputs.gerrit_refspec }}
+          # yamllint disable-line rule:line-length
+          gerrit-refspec: ${{ startsWith(inputs.gerrit_refspec, 'refs/changes/') && inputs.gerrit_refspec || needs.rust-metadata.outputs.sha }}
           gerrit-project: ${{ inputs.gerrit_project }}
           # yamllint disable-line rule:line-length
           gerrit-url: ${{ inputs.gerrit_url != '' && inputs.gerrit_url || vars.GERRIT_URL }}
@@ -652,8 +673,34 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           repository: ${{ inputs.repository || github.repository }}
-          ref: ${{ inputs.ref }}
+          # yamllint disable-line rule:line-length
+          ref: ${{ startsWith(needs.rust-metadata.outputs.ref, 'refs/tags/') && needs.rust-metadata.outputs.ref || needs.rust-metadata.outputs.sha }}
           persist-credentials: false
+
+      - name: 'Pin the commit rust-metadata read'
+        if: inputs.gerrit_refspec == ''
+        shell: bash
+        env:
+          SHA: ${{ needs.rust-metadata.outputs.sha }}
+          REF: ${{ needs.rust-metadata.outputs.ref }}
+        run: |
+          # Pin the commit rust-metadata read
+          set -euo pipefail
+          head="$(git rev-parse HEAD)"
+          if [ -z "$SHA" ] || [ "$head" != "$SHA" ]; then
+            echo "::error::Checked out $head, but rust-metadata read" \
+              "'$SHA'; ${REF:-the ref} moved during the run"
+            exit 1
+          fi
+          case "$REF" in
+            refs/heads/*)
+              git checkout --quiet -B "${REF#refs/heads/}"
+              echo "On branch ${REF#refs/heads/} at $SHA" ;;
+            refs/tags/*)
+              echo "At tag ${REF#refs/tags/}, commit $SHA" ;;
+            *)
+              echo "At commit $SHA" ;;
+          esac
 
       - name: 'Restore the resolved lockfile'
         if: needs.rust-metadata.outputs.lockfile_generated == 'true'
@@ -744,7 +791,8 @@ jobs:
         # yamllint disable-line rule:line-length
         uses: lfreleng-actions/checkout-gerrit-change-action@35e98c8043ec411611e464e296bcfb441a5c5093  # v1.1.2
         with:
-          gerrit-refspec: ${{ inputs.gerrit_refspec }}
+          # yamllint disable-line rule:line-length
+          gerrit-refspec: ${{ startsWith(inputs.gerrit_refspec, 'refs/changes/') && inputs.gerrit_refspec || needs.rust-metadata.outputs.sha }}
           gerrit-project: ${{ inputs.gerrit_project }}
           # yamllint disable-line rule:line-length
           gerrit-url: ${{ inputs.gerrit_url != '' && inputs.gerrit_url || vars.GERRIT_URL }}
@@ -757,8 +805,34 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           repository: ${{ inputs.repository || github.repository }}
-          ref: ${{ inputs.ref }}
+          # yamllint disable-line rule:line-length
+          ref: ${{ startsWith(needs.rust-metadata.outputs.ref, 'refs/tags/') && needs.rust-metadata.outputs.ref || needs.rust-metadata.outputs.sha }}
           persist-credentials: false
+
+      - name: 'Pin the commit rust-metadata read'
+        if: inputs.gerrit_refspec == ''
+        shell: bash
+        env:
+          SHA: ${{ needs.rust-metadata.outputs.sha }}
+          REF: ${{ needs.rust-metadata.outputs.ref }}
+        run: |
+          # Pin the commit rust-metadata read
+          set -euo pipefail
+          head="$(git rev-parse HEAD)"
+          if [ -z "$SHA" ] || [ "$head" != "$SHA" ]; then
+            echo "::error::Checked out $head, but rust-metadata read" \
+              "'$SHA'; ${REF:-the ref} moved during the run"
+            exit 1
+          fi
+          case "$REF" in
+            refs/heads/*)
+              git checkout --quiet -B "${REF#refs/heads/}"
+              echo "On branch ${REF#refs/heads/} at $SHA" ;;
+            refs/tags/*)
+              echo "At tag ${REF#refs/tags/}, commit $SHA" ;;
+            *)
+              echo "At commit $SHA" ;;
+          esac
 
       - name: 'Restore the resolved lockfile'
         if: needs.rust-metadata.outputs.lockfile_generated == 'true'
@@ -847,7 +921,8 @@ jobs:
         # yamllint disable-line rule:line-length
         uses: lfreleng-actions/checkout-gerrit-change-action@35e98c8043ec411611e464e296bcfb441a5c5093  # v1.1.2
         with:
-          gerrit-refspec: ${{ inputs.gerrit_refspec }}
+          # yamllint disable-line rule:line-length
+          gerrit-refspec: ${{ startsWith(inputs.gerrit_refspec, 'refs/changes/') && inputs.gerrit_refspec || needs.rust-metadata.outputs.sha }}
           gerrit-project: ${{ inputs.gerrit_project }}
           # yamllint disable-line rule:line-length
           gerrit-url: ${{ inputs.gerrit_url != '' && inputs.gerrit_url || vars.GERRIT_URL }}
@@ -860,8 +935,34 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           repository: ${{ inputs.repository || github.repository }}
-          ref: ${{ inputs.ref }}
+          # yamllint disable-line rule:line-length
+          ref: ${{ startsWith(needs.rust-metadata.outputs.ref, 'refs/tags/') && needs.rust-metadata.outputs.ref || needs.rust-metadata.outputs.sha }}
           persist-credentials: false
+
+      - name: 'Pin the commit rust-metadata read'
+        if: inputs.gerrit_refspec == ''
+        shell: bash
+        env:
+          SHA: ${{ needs.rust-metadata.outputs.sha }}
+          REF: ${{ needs.rust-metadata.outputs.ref }}
+        run: |
+          # Pin the commit rust-metadata read
+          set -euo pipefail
+          head="$(git rev-parse HEAD)"
+          if [ -z "$SHA" ] || [ "$head" != "$SHA" ]; then
+            echo "::error::Checked out $head, but rust-metadata read" \
+              "'$SHA'; ${REF:-the ref} moved during the run"
+            exit 1
+          fi
+          case "$REF" in
+            refs/heads/*)
+              git checkout --quiet -B "${REF#refs/heads/}"
+              echo "On branch ${REF#refs/heads/} at $SHA" ;;
+            refs/tags/*)
+              echo "At tag ${REF#refs/tags/}, commit $SHA" ;;
+            *)
+              echo "At commit $SHA" ;;
+          esac
 
       - name: 'Restore the resolved lockfile'
         if: needs.rust-metadata.outputs.lockfile_generated == 'true'
@@ -921,7 +1022,8 @@ jobs:
         # yamllint disable-line rule:line-length
         uses: lfreleng-actions/checkout-gerrit-change-action@35e98c8043ec411611e464e296bcfb441a5c5093  # v1.1.2
         with:
-          gerrit-refspec: ${{ inputs.gerrit_refspec }}
+          # yamllint disable-line rule:line-length
+          gerrit-refspec: ${{ startsWith(inputs.gerrit_refspec, 'refs/changes/') && inputs.gerrit_refspec || needs.rust-metadata.outputs.sha }}
           gerrit-project: ${{ inputs.gerrit_project }}
           # yamllint disable-line rule:line-length
           gerrit-url: ${{ inputs.gerrit_url != '' && inputs.gerrit_url || vars.GERRIT_URL }}
@@ -935,9 +1037,35 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           repository: ${{ inputs.repository || github.repository }}
-          ref: ${{ inputs.ref }}
+          # yamllint disable-line rule:line-length
+          ref: ${{ startsWith(needs.rust-metadata.outputs.ref, 'refs/tags/') && needs.rust-metadata.outputs.ref || needs.rust-metadata.outputs.sha }}
           fetch-depth: 2
           persist-credentials: false
+
+      - name: 'Pin the commit rust-metadata read'
+        if: inputs.gerrit_refspec == ''
+        shell: bash
+        env:
+          SHA: ${{ needs.rust-metadata.outputs.sha }}
+          REF: ${{ needs.rust-metadata.outputs.ref }}
+        run: |
+          # Pin the commit rust-metadata read
+          set -euo pipefail
+          head="$(git rev-parse HEAD)"
+          if [ -z "$SHA" ] || [ "$head" != "$SHA" ]; then
+            echo "::error::Checked out $head, but rust-metadata read" \
+              "'$SHA'; ${REF:-the ref} moved during the run"
+            exit 1
+          fi
+          case "$REF" in
+            refs/heads/*)
+              git checkout --quiet -B "${REF#refs/heads/}"
+              echo "On branch ${REF#refs/heads/} at $SHA" ;;
+            refs/tags/*)
+              echo "At tag ${REF#refs/tags/}, commit $SHA" ;;
+            *)
+              echo "At commit $SHA" ;;
+          esac
 
       - name: 'Restore the resolved lockfile'
         if: needs.rust-metadata.outputs.lockfile_generated == 'true'
@@ -1145,7 +1273,9 @@ jobs:
 
   cbom:
     name: 'Generate CBOM'
-    needs: build
+    needs:
+      - rust-metadata
+      - build
     # yamllint disable-line rule:line-length
     if: ${{ !cancelled() && needs.build.result == 'success' && inputs.cbom_enabled }}
     # Advisory: findings, a scanner error or a timeout never fail the
@@ -1176,7 +1306,8 @@ jobs:
         # yamllint disable-line rule:line-length
         uses: lfreleng-actions/checkout-gerrit-change-action@35e98c8043ec411611e464e296bcfb441a5c5093  # v1.1.2
         with:
-          gerrit-refspec: ${{ inputs.gerrit_refspec }}
+          # yamllint disable-line rule:line-length
+          gerrit-refspec: ${{ startsWith(inputs.gerrit_refspec, 'refs/changes/') && inputs.gerrit_refspec || needs.rust-metadata.outputs.sha }}
           gerrit-project: ${{ inputs.gerrit_project }}
           # yamllint disable-line rule:line-length
           gerrit-url: ${{ inputs.gerrit_url != '' && inputs.gerrit_url || vars.GERRIT_URL }}
@@ -1189,8 +1320,34 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           repository: ${{ inputs.repository || github.repository }}
-          ref: ${{ inputs.ref }}
+          # yamllint disable-line rule:line-length
+          ref: ${{ startsWith(needs.rust-metadata.outputs.ref, 'refs/tags/') && needs.rust-metadata.outputs.ref || needs.rust-metadata.outputs.sha }}
           persist-credentials: false
+
+      - name: 'Pin the commit rust-metadata read'
+        if: inputs.gerrit_refspec == ''
+        shell: bash
+        env:
+          SHA: ${{ needs.rust-metadata.outputs.sha }}
+          REF: ${{ needs.rust-metadata.outputs.ref }}
+        run: |
+          # Pin the commit rust-metadata read
+          set -euo pipefail
+          head="$(git rev-parse HEAD)"
+          if [ -z "$SHA" ] || [ "$head" != "$SHA" ]; then
+            echo "::error::Checked out $head, but rust-metadata read" \
+              "'$SHA'; ${REF:-the ref} moved during the run"
+            exit 1
+          fi
+          case "$REF" in
+            refs/heads/*)
+              git checkout --quiet -B "${REF#refs/heads/}"
+              echo "On branch ${REF#refs/heads/} at $SHA" ;;
+            refs/tags/*)
+              echo "At tag ${REF#refs/tags/}, commit $SHA" ;;
+            *)
+              echo "At commit $SHA" ;;
+          esac
 
       - name: 'Generate CBOM'
         id: cbom

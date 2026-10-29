@@ -268,21 +268,22 @@ build -> { tests | audit | sbom -> grype | cbom }
   `releases/`, through `release-check.yaml`, the workflow the merge
   lane's job of the same name runs (Q8), so verify predicts merge and
   the two can't drift, as the docker lanes check a release file before
-  merge. It checks out the commit `rust-metadata` read, so the file
-  and the crate versions come from one revision when `ref` names a
-  branch that moves; a Gerrit patch set is immutable, so that path
-  fetches the refspec itself rather than ask Gerrit for an unmerged
-  commit by SHA. On a pull request it compares that merge commit
-  with the pull request's base, so a file in any commit of the change
-  counts; on a Gerrit patch set, or an explicit `ref`, it compares the
-  commit with its first parent. It fails on a file YAML can't parse,
-  or that isn't one document holding a mapping with a single
-  top-level `version` key (a parser reads it, so `1.2.0#rc` is the one
-  scalar YAML makes of it, not `1.2.0` with a comment), two files in
-  one change, a name outside letters, digits, `.`, `_` and `-` (the
-  name lands in `GITHUB_OUTPUT`, where a newline could forge a
-  record), a version that isn't a final `X.Y.Z`, and a version
-  differing from any crate `rust-metadata` lists as publishable,
+  merge. It checks out the commit `rust-metadata` read, so the file and
+  the crate versions come from one revision when `ref` names a branch
+  that moves; a Gerrit change refspec names an immutable patch set, so
+  that path fetches the refspec itself rather than ask Gerrit for an
+  unmerged commit by SHA, and any other Gerrit refspec fetches that
+  commit by SHA, as the later jobs do. On a pull request it compares
+  that merge commit with the pull request's base, so a file in any
+  commit of the change counts; on a Gerrit patch set, or an explicit
+  `ref`, it compares the commit with its first parent. It fails on a
+  file YAML can't parse, or that isn't one document holding a mapping
+  with a single top-level `version` key (a parser reads it, so
+  `1.2.0#rc` is the one scalar YAML makes of it, not `1.2.0` with a
+  comment), two files in one change, a name outside letters, digits,
+  `.`, `_` and `-` (the name lands in `GITHUB_OUTPUT`, where a newline
+  could forge a record), a version that isn't a final `X.Y.Z`, and a
+  version differing from any crate `rust-metadata` lists as publishable,
   naming each such crate. A `v<version>` tag that already exists is a
   warning, whichever commit it names (`tag_conflict: review`): the
   merged commit doesn't exist yet, so even a tag on the commit under
@@ -306,6 +307,28 @@ build -> { tests | audit | sbom -> grype | cbom }
 - Each job checks out the source itself. Rust tests and audits work
   from source, not from the build's outputs; the build artefact exists
   for releases and for callers.
+- `rust-metadata` records the commit it read and, on the GitHub
+  checkout path, the branch or tag that named it, and every job after
+  it, `check-release` included, checks out that commit, as the merge
+  lane does from `check-release` (Q8). A `ref` naming a branch that
+  moves mid-run, an explicit `ref: main` or a Gerrit `refs/heads/...`
+  refspec, then can't give the release check, build, tests or audits
+  a newer commit than the toolchain, test matrix and publishable
+  crates describe. On the GitHub path a branch comes back as a local
+  branch at the commit, so a build script reading
+  `git symbolic-ref --short HEAD` still finds one. A tag, named as
+  `ref` or pushed with an empty `ref`, comes back by name, so
+  `git describe --tags --exact-match` still finds it, and the job
+  fails if the tag has moved. A pull request's merge commit and a
+  plain SHA check out detached, as before. The one
+  exception is a Gerrit change refspec (`refs/changes/...`): it names
+  an immutable patch set, which every job, `check-release` too,
+  fetches as given, since the checkout action's mirror-less path
+  looks a refspec up by name and can't fetch an unmerged commit by
+  SHA. Any other Gerrit refspec names a merged commit, which every
+  job fetches by SHA.
+  `repository-metadata` runs beside `rust-metadata` and still reads
+  `ref` itself, since it informs and gates nothing.
 - `build` and `tests` run once per entry in `runners` (D4); `tests`
   multiplies that by the toolchain matrix. `audit`, `sbom` and `grype`
   run once: the lockfile they read is the same on every platform.
