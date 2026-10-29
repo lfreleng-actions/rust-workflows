@@ -802,7 +802,11 @@ changes once upstream support exists.
     `gh`, across `fail`, `warn` and `review` for a free tag, a tag on
     the commit, one on another commit, an annotated tag, an unreadable
     tag object and a failed lookup;
-  - the release lane with `dry_run: true` on the signed tag `v0.1.1`;
+  - the release lane with `dry_run: true` in two legs: on the signed
+    tag `v0.1.1` in manifest mode, and on the signed tag `v0.1.3` in
+    tag mode, where the fixture's `Cargo.toml` holds `0.0.0` and the
+    artefacts job checks that the crate, the assets and the SBOM's
+    root component carry `0.1.3`;
   - the merge lane with `dry_run: true`, on a commit that adds no
     release file, and again on the fixture's merge commit that adds
     `releases/workspace-0.1.0.yaml`, with `path_prefix:
