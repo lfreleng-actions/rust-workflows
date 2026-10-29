@@ -169,6 +169,12 @@ on:
           Commit the job read, so a later job can check out the same
           revision when 'ref' names a branch that may move
         value: ${{ jobs.rust-metadata.outputs.sha }}
+      ref:
+        description: >-
+          Branch (refs/heads/...) or tag (refs/tags/...) that named sha
+          on the GitHub checkout path; empty for a pull request, a
+          plain SHA or a Gerrit checkout
+        value: ${{ jobs.rust-metadata.outputs.ref }}
 
 permissions: {}
 
@@ -196,6 +202,7 @@ jobs:
       lockfile_dir: ${{ steps.lockfile.outputs.dir }}
       lockfile_artefact: ${{ steps.lockfile.outputs.artefact }}
       sha: ${{ steps.commit.outputs.sha }}
+      ref: ${{ steps.commit.outputs.ref }}
     steps:
       - name: 'Load egress allow-list'
         # yamllint disable-line rule:line-length
@@ -233,15 +240,46 @@ jobs:
           persist-credentials: false
 
       # The commit behind every output: a branch 'ref' can move between
-      # this job and the next, so a job comparing its own checkout with
-      # these outputs pins to this commit instead.
+      # this job and the next, so a later job checks out this commit
+      # instead. On the GitHub path it also records the branch or tag
+      # that named the commit, so a later job can restore the branch,
+      # or check out the tag, around it: a pull request's merge commit
+      # or a plain SHA records none.
       - name: 'Record the commit'
         id: commit
         shell: bash
+        env:
+          GERRIT_REFSPEC: ${{ inputs.gerrit_refspec }}
+          # The ref actions/checkout resolved: the 'ref' input, or the
+          # event's ref when it checks out the calling repository.
+          # yamllint disable rule:line-length
+          REQUESTED: >-
+            ${{ inputs.ref != '' && inputs.ref
+              || ((inputs.repository == '' || inputs.repository == github.repository) && github.ref || '') }}
+          # yamllint enable rule:line-length
         run: |
           # Record the commit
           set -euo pipefail
-          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          sha="$(git rev-parse HEAD)"
+          ref=''
+          if [ -z "$GERRIT_REFSPEC" ]; then
+            if branch="$(git symbolic-ref -q HEAD)"; then
+              ref="$branch"
+            elif [ -n "$REQUESTED" ]; then
+              tag="refs/tags/${REQUESTED#refs/tags/}"
+              if git check-ref-format "$tag" \
+                && git show-ref --verify --quiet "$tag" \
+                && [ "$(git rev-parse --verify --quiet "$tag^{commit}")" \
+                  = "$sha" ]; then
+                ref="$tag"
+              fi
+            fi
+          fi
+          {
+            echo "sha=$sha"
+            echo "ref=$ref"
+          } >> "$GITHUB_OUTPUT"
+          echo "Read ${ref:-a detached commit} at $sha"
 
       # path_prefix and manifest_path must name a regular Cargo.toml
       # inside the workspace, reached through no symlink, as the Rust
