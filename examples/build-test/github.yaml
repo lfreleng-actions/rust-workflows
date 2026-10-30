@@ -90,8 +90,12 @@ jobs:
     #   grype_enabled: true           # false skips the Grype scan only
     #   grype_fail_on: 'medium'       # severity gate; 'none' never gates
     #   grype_permit_fail: false      # true reports without failing
-    #   grype_gate_when: 'always'     # or 'dependencies-changed'
-    #   grype_only_fixed: false       # ignore unfixable advisories
+    #   grype_gate_when: 'dependencies-changed'  # or 'always'
+    #   grype_remediation_window_days: '14'  # '' turns the window off
+    #   grype_remediation_window_start: ''   # YYYY-MM-DD adoption day
+    #   grype_dependency_policy: 'declared'  # or 'all'
+    #   grype_transitive_fail_on: 'critical' # inherited crates' gate
+    #   grype_only_fixed: true        # unfixable advisories warn
     #
     #   # CBOM (advisory; scans Java, Python and Go sources only)
     #   cbom_enabled: false
