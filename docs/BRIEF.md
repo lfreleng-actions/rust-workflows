@@ -45,7 +45,7 @@ State on 2026-10-17.
 | Test         | `rust-test-action`          | Released v0.0.1                                                                                                          |
 | Audit        | `rust-audit-action`         | Released v0.0.1                                                                                                          |
 | SBOM         | `sbom-action`               | Released v0.7.0: `cyclonedx` backend with a `cargo` dependency manager, feature selection, working directory and version |
-| Scan         | `grype-scan-action`         | Released v0.4.0: dependency policy, Cargo graph classification                                                           |
+| Scan         | `grype-scan-action`         | Released v0.5.0: dependency policy, Cargo graph classification, remediation window                                       |
 | CBOM         | `cbom-action`               | Released v0.0.1; no Rust coverage upstream (#10), so the lanes scan other languages alone                                |
 | Publish      | `rust-crate-publish-action` | Released v0.3.0: named registries, workspace sets, semver checks, `toolchain` and `version` inputs                       |
 | Test fixture | `test-rust-project`         | Crate `lfreleng-test-rust-project` 0.1.2 on crates.io, published through Trusted Publishing; variants                    |
@@ -352,9 +352,10 @@ build -> { tests | audit | sbom -> grype | cbom }
   with its first parent, in a `dependency-change.json` sidecar beside
   the SBOM. It reads paths NUL-delimited, so a name Git would quote
   still matches, and without rename detection, so a manifest moved
-  away counts too. With `grype_gate_when: dependencies-changed`, Grype gates
-  when that answer is yes, treats a missing answer as yes, and
-  otherwise reports its findings as warnings.
+  away counts too. Under `grype_gate_when: dependencies-changed`, the
+  verify lane's default, Grype gates when that answer is yes, treats a
+  missing answer as yes, and otherwise reports its findings as
+  warnings until the remediation window closes on each.
 - `cbom` is advisory (Q13).
 
 ### Q7: Release job graph (Model A)
@@ -613,7 +614,7 @@ match the Python family where the meaning matches.
 | `deny_enabled`, `deny_checks`                                     | audit (`cargo deny`)  | `false`, `advisories bans licenses sources`                          |
 | `sbom_enabled`, `sbom_include_dev`, `sbom_format`                 | sbom                  | `true`, `false` (build-dependencies; Q13), `both`                    |
 | `grype_enabled`, `grype_fail_on`, `grype_permit_fail`             | grype                 | `true`, `medium`, `false` (falls back to `vars.NO_BLOCK_AUDIT_FAIL`) |
-| `grype_dependency_policy`, `grype_transitive_fail_on`             | grype                 | `all`, `none` (Q13)                                                  |
+| `grype_dependency_policy`, `grype_transitive_fail_on`             | grype                 | `declared`, `critical` (Q13)                                         |
 | `harden_runner_egress`, `harden_runner_allowlist`                 | harden-runner         | `block`, pinned organisation list                                    |
 | `gerrit_refspec`, `gerrit_project`, `gerrit_branch`, `gerrit_url` | Gerrit-aware checkout | `''`                                                                 |
 | `gerrit_patchset_revision` (merge lane)                           | resolve-commit        | `''` (Q8)                                                            |
@@ -622,7 +623,8 @@ match the Python family where the meaning matches.
 | `build_timeout_minutes`, `test_timeout_minutes`                   | build, tests          | `20`, `20` (D6)                                                      |
 | `audit_timeout_minutes`                                           | audit, sbom, grype    | `10` (D6)                                                            |
 | `auditable`                                                       | build                 | `false`                                                              |
-| `grype_gate_when`, `grype_only_fixed`, `grype_cache_db`           | grype                 | `always`, `false`, `true`                                            |
+| `grype_gate_when`, `grype_only_fixed`, `grype_cache_db`           | grype                 | `dependencies-changed`, `true`, `true` (Q13)                         |
+| `grype_remediation_window_days`, `grype_remediation_window_start` | grype                 | `14`, `''` (Q13)                                                     |
 | `cbom_enabled`, `cbom_languages`, `cbom_timeout_minutes`          | cbom                  | `false`, `''`, `30` (Q13)                                            |
 | `artefact_suffix`                                                 | every artefact name   | `''`                                                                 |
 
@@ -646,9 +648,12 @@ failing test or audit because of a repository-wide switch.
 
 The release and merge workflows take the same inputs, except that
 `lockfile_required` defaults to `true` (D5), `cache` does not exist
-(D1), and `grype_gate_when`, `grype_cache_db` and the CBOM inputs
-belong to the verify lane alone: a release scan always gates and never
-writes the database cache. Both add `semver_checks` (`false`),
+(D1), `grype_gate_when`, the remediation window, `grype_cache_db` and
+the CBOM inputs belong to the verify lane alone, and
+`grype_dependency_policy`, `grype_transitive_fail_on` and
+`grype_only_fixed` keep the action's defaults, `all`, `none` and
+`false`: a release scan always gates on the full set and never writes
+the database cache. Both add `semver_checks` (`false`),
 `publish_enabled` (`false`), `publish_environment` (`production`) and
 `dry_run` (`false`). The release workflow also adds `attestations`
 (`true`), `sigstore_sign` (`true`, D3), `tag` (for a dry run) and the
@@ -736,20 +741,37 @@ or Git source, so a sibling workspace member stays declared and an
 unknown shape gates rather than passes.
 
 The lanes expose the severity threshold, fixed-advisory filtering,
-`permit-fail` and, on the verify lane, `gate-when` and `cache-db`.
-They also expose the provenance controls as `grype_dependency_policy`
-and `grype_transitive_fail_on`, at the action's defaults, `all` and
-`none`: every finding gates, as before, until a project opts in. A
-project that sets `grype_dependency_policy: declared` gates on the
-crates it declares and reports inherited ones as warnings, and
-`grype_transitive_fail_on: high` (for one) still gates an inherited
-crate at that severity. No sibling family exposes these inputs yet, so
-the names follow the lanes' `grype_` convention. `declared-source` and
-`declared-dependencies` stay at the action's defaults: the Cargo graph
-carries its own provenance. The action reads that graph from the JSON
-SBOM, so with `sbom_format: xml` every finding counts as declared and
-gates. A release or merge scan always gates,
-whatever changed, under the policy the caller chose.
+`permit-fail` and, on the verify lane, `gate-when`, the remediation
+window (v0.5.0, grype-scan-action #45 and #47) and `cache-db`. They
+also expose the provenance controls as `grype_dependency_policy` and
+`grype_transitive_fail_on`. The names follow the lanes' `grype_`
+convention.
+
+The verify lane adopts the change-scoped posture agreed in
+grype-scan-action #10: `grype_gate_when: dependencies-changed`,
+`grype_dependency_policy: declared`, `grype_transitive_fail_on:
+critical`, `grype_only_fixed: true` and
+`grype_remediation_window_days: 14`. A change that touches
+`Cargo.toml`, `Cargo.lock` or `.cargo/config*` gates on the crates the
+project declares at `grype_fail_on` and on inherited crates at
+`critical`. A change that leaves them alone reports findings as
+warnings until a fix has been available for 14 days, then gates as if
+armed; unfixable advisories warn. An unresolvable change signal or
+provenance still gates: the action fails closed.
+`grype_remediation_window_start` (`YYYY-MM-DD`, empty by default)
+floors the window clock, so a project that sets it to its adoption day
+gives an existing backlog the full window. A project that wants the
+old posture sets `grype_gate_when: always`, `grype_dependency_policy:
+all` and `grype_only_fixed: false`.
+
+The release and merge lanes keep the action's defaults, `all`, `none`
+and `false`, and a release or merge scan always gates, whatever
+changed, under the policy the caller chose. Whether the merge lane
+should gate at all is the open phase 3 question of
+grype-scan-action #10. `declared-source` and `declared-dependencies`
+stay at the action's defaults: the Cargo graph carries its own
+provenance. The action reads that graph from the JSON SBOM, so with
+`sbom_format: xml` every finding counts as declared and gates.
 
 CBOM: `cbom-action` covers Java, Python and Go (C# in preview), and
 CBOMkit and sonar-cryptography do not analyse Rust. Rust coverage
@@ -778,6 +800,14 @@ changes once upstream support exists.
     `path_prefix`. The root call also enables CBOM, which proves the
     job's wiring and its clean skip on a pure Rust project, not a
     scan;
+  - the verify lane's remediation window on the fixture's merge commit
+    that adds `releases/workspace-0.1.0.yaml` and touches no Cargo
+    file, with the workspace variant selected so the release file
+    matches and a 7-day window, so the dependency-changed gate stays
+    unarmed and the window alone can arm it; and, since no output
+    reflects `grype_remediation_window_start` without a finding of
+    known fix date, a static check that the Grype job passes both
+    window inputs to the action;
   - the verify lane's release-file check on the fixture's merge commit
     that adds `releases/workspace-0.1.0.yaml`, with the workspace
     variant selected and the other stages off, which reports release
@@ -820,7 +850,9 @@ changes once upstream support exists.
   - a final job that checks the artefacts the lanes left: the resolved
     lockfile, the SBOM contents, the dependency-change sidecar, both
     platforms' binaries, the MSRV leg and the packaged crates. It also
-    checks the verify lane's release-file outputs and the merge calls'
+    checks that the window leg's Grype gate reports itself armed by a
+    7-day window, the verify lane's release-file outputs and the merge
+    calls'
     outputs: no release on the first, and on
     the second `has_release: true`, version `0.1.0`, tag `v0.1.0`
     though the dry run creates none, and both

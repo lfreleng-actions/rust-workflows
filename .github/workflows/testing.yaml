@@ -38,7 +38,8 @@ permissions: {}
 #   signed tag v0.1.1 on that commit, with the fixture variants. The
 #   verify and merge calls check it out.
 # - bce2cc4d, the merge commit that adds releases/workspace-0.1.0.yaml.
-#   The release-file calls check it out.
+#   It touches no Cargo file. The release-file calls and the Grype
+#   window call check it out.
 # - 7dc2489, where the signed tag v0.1.3 sits and Cargo.toml keeps the
 #   placeholder 0.0.0. The release rehearsal's tag-mode leg checks it
 #   out, so crate 0.1.3 can only come from the tag's version.
@@ -331,6 +332,88 @@ jobs:
       audit_enabled: false
       sbom_enabled: false
       artefact_suffix: '-release-file'
+
+  # The verify lane's remediation window, on the fixture's merge commit
+  # that adds a release file and touches no Cargo file, so the
+  # dependency-changed gate stays unarmed and the window alone can arm
+  # it. A window of 7 days, not the default 14, shows the input reached
+  # the action: the artefacts job checks the gate it reports. Without
+  # the window the gate would report itself inactive. The release file
+  # is the workspace variant's, so the call selects that variant, as
+  # verify-release-file does, and the release-file check passes.
+  # Nothing the action reports depends on the window's start date, so
+  # grype-window-wiring checks that input's pass-through instead.
+  verify-grype-window:
+    name: 'Verify (Grype window)'
+    # Granted for the same reason as verify-release-file above.
+    permissions:
+      contents: read
+      pull-requests: read  # repository-metadata-action queries PR data
+      issues: read  # grype-scan-action reads cve-bypass issues
+    uses: $/.github/workflows/build-test.yaml
+    with:
+      repository: 'lfreleng-actions/test-rust-project'
+      ref: 'bce2cc4d755482611d38a2f8f90661a89efcf4f6'
+      path_prefix: 'variants/workspace'
+      tests_enabled: false
+      audit_enabled: false
+      grype_remediation_window_days: '7'
+      grype_remediation_window_start: '2026-10-29'
+      artefact_suffix: '-grype-window'
+
+  # The verify lane hands both window inputs to the Grype action. The
+  # window leg above proves the days arrive, through the gate the
+  # action reports; no output reflects the start date unless a finding
+  # with a known fix date turns up, which the fixture cannot promise.
+  # Dropping that mapping would lose adopters their backlog's grace
+  # period with every run still green, so assert the wiring itself.
+  grype-window-wiring:
+    name: 'Grype Window Wiring'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    timeout-minutes: 5
+    steps:
+      - name: 'Harden runner'
+        # yamllint disable-line rule:line-length
+        uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43  # v2.22.3
+        with:
+          egress-policy: 'audit'
+
+      - name: 'Checkout repository'
+        # yamllint disable-line rule:line-length
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: 'The verify lane passes both window inputs to Grype'
+        shell: bash
+        run: |
+          # The verify lane passes both window inputs to Grype
+          set -euo pipefail
+          failed=0
+          file='.github/workflows/build-test.yaml'
+          step='.jobs.grype.steps[] | select(.id == "grype-audit") | .with'
+          for name in days start; do
+            input="grype_remediation_window_$name"
+            key="remediation-window-$name"
+            # Split so the runner does not evaluate the expression.
+            want='$'"{{ inputs.$input }}"
+            got="$(yq "$step | .\"$key\"" "$file")"
+            if [ "$got" = "$want" ]; then
+              echo "✅ $key takes $input"
+            else
+              echo "::error::$key in the grype job is '$got'," \
+                "not the $input input"
+              failed=1
+            fi
+            if [ "$(yq ".on.workflow_call.inputs | has(\"$input\")" \
+              "$file")" != 'true' ]; then
+              echo "::error::The verify lane declares no $input input"
+              failed=1
+            fi
+          done
+          exit "$failed"
 
   # The verify lane on a branch and on a tag rather than a SHA. Every
   # job after rust-metadata checks out the commit rust-metadata read and
@@ -1191,6 +1274,7 @@ jobs:
     needs:
       - verify
       - verify-release-file
+      - verify-grype-window
       - release-dry-run
       - merge-dry-run
       - merge-release-dry-run
@@ -1199,6 +1283,7 @@ jobs:
     if: >-
       ${{ !cancelled() && needs.verify.result == 'success'
       && needs.verify-release-file.result == 'success'
+      && needs.verify-grype-window.result == 'success'
       && contains(fromJSON('["success", "skipped"]'), needs.release-dry-run.result)
       && contains(fromJSON('["success", "skipped"]'), needs.merge-dry-run.result)
       && contains(fromJSON('["success", "skipped"]'), needs.merge-release-dry-run.result) }}
@@ -1226,6 +1311,10 @@ jobs:
           # yamllint disable-line rule:line-length
           VERIFY_HAS_RELEASE: ${{ needs.verify-release-file.outputs.has_release }}
           VERIFY_VERSION: ${{ needs.verify-release-file.outputs.version }}
+          # yamllint disable-line rule:line-length
+          WINDOW_GATE_ACTIVE: ${{ needs.verify-grype-window.outputs.grype_gate_active }}
+          # yamllint disable-line rule:line-length
+          WINDOW_GATE_REASON: ${{ needs.verify-grype-window.outputs.grype_gate_reason }}
           RELEASE_RAN: ${{ needs.release-dry-run.result == 'success' }}
           MERGE_RAN: ${{ needs.merge-dry-run.result == 'success' }}
           MERGE_HAS_RELEASE: ${{ needs.merge-dry-run.outputs.has_release }}
@@ -1301,6 +1390,16 @@ jobs:
           else
             got="'$VERIFY_HAS_RELEASE', '$VERIFY_VERSION'"
             miss "The verify lane reported has_release, version: $got"
+          fi
+          # An unarmed gate arms only through the window, and reports it.
+          window='a finding gates once its fix has been available'
+          window="$window for 7 day(s)"
+          if [ "$WINDOW_GATE_ACTIVE" = 'true' ] \
+            && [[ "$WINDOW_GATE_REASON" == *"; $window" ]]; then
+            pass 'The verify lane passed the remediation window to Grype'
+          else
+            got="'$WINDOW_GATE_ACTIVE', '$WINDOW_GATE_REASON'"
+            miss "The Grype window leg reported gate-active, reason: $got"
           fi
           if [ "$RELEASE_RAN" != 'true' ]; then
             echo "::notice::The release dry run skipped on this event"

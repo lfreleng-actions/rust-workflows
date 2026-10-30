@@ -285,7 +285,7 @@ on:
           ones as warnings, subject to grype_transitive_fail_on
         required: false
         type: string
-        default: 'all'
+        default: 'declared'
       grype_transitive_fail_on:
         description: >-
           Under grype_dependency_policy 'declared', the lowest severity
@@ -293,7 +293,7 @@ on:
           high or critical; 'none' never gates on one
         required: false
         type: string
-        default: 'none'
+        default: 'critical'
       grype_permit_fail:
         description: >-
           Report Grype findings without failing the job. When false,
@@ -305,15 +305,35 @@ on:
         description: >-
           'always' gates on every scan. 'dependencies-changed' gates
           only when the change touches Cargo.toml, Cargo.lock or Cargo
-          configuration, and otherwise reports findings as warnings.
+          configuration, and otherwise reports findings as warnings,
+          subject to grype_remediation_window_days.
         required: false
         type: string
-        default: 'always'
+        default: 'dependencies-changed'
+      grype_remediation_window_days:
+        description: >-
+          Under grype_gate_when 'dependencies-changed', days a finding in
+          a change that left the dependencies alone stays a warning
+          after its fix became available, before it gates. A whole
+          number; empty turns the window off.
+        required: false
+        type: string
+        default: '14'
+      grype_remediation_window_start:
+        description: >-
+          Optional YYYY-MM-DD floor for the remediation window clock,
+          such as the day a project adopts the window, so an existing
+          backlog gets the full window. Must not be in the future.
+        required: false
+        type: string
+        default: ''
       grype_only_fixed:
-        description: 'Report only vulnerabilities that have a fix'
+        description: >-
+          Gate only on vulnerabilities that have a fix; an unfixable
+          advisory is reported as a warning
         required: false
         type: boolean
-        default: false
+        default: true
       grype_cache_db:
         description: "Grype database cache: 'true', 'false' or 'restore-only'"
         required: false
@@ -402,6 +422,16 @@ on:
       tag:
         description: 'Tag the release would create; empty without one'
         value: ${{ jobs.check-release.outputs.tag }}
+      grype_gate_active:
+        description: >-
+          'true' when a Grype finding could block the run, before
+          grype_permit_fail; empty when the scan did not run
+        value: ${{ jobs.grype.outputs.gate_active }}
+      grype_gate_reason:
+        description: >-
+          Why the Grype gate is or is not armed, as the action reports
+          it; empty when the scan did not run
+        value: ${{ jobs.grype.outputs.gate_reason }}
 
 permissions: {}
 
@@ -452,6 +482,8 @@ jobs:
           GRYPE_DEPENDENCY_POLICY: ${{ inputs.grype_dependency_policy }}
           GRYPE_TRANSITIVE_FAIL_ON: ${{ inputs.grype_transitive_fail_on }}
           GRYPE_GATE_WHEN: ${{ inputs.grype_gate_when }}
+          GRYPE_WINDOW_DAYS: ${{ inputs.grype_remediation_window_days }}
+          GRYPE_WINDOW_START: ${{ inputs.grype_remediation_window_start }}
           GRYPE_CACHE_DB: ${{ inputs.grype_cache_db }}
           CBOM_LANGUAGES: ${{ inputs.cbom_languages }}
         run: |
@@ -477,6 +509,17 @@ jobs:
           check grype_gate_when "$GRYPE_GATE_WHEN" \
             'always dependencies-changed'
           check grype_cache_db "$GRYPE_CACHE_DB" 'true false restore-only'
+          if ! [[ "$GRYPE_WINDOW_DAYS" =~ ^([0-9]+)?$ ]]; then
+            echo "::error::grype_remediation_window_days: expected ''" \
+              "or a whole number of days"
+            failed=1
+          fi
+          if ! [[ "$GRYPE_WINDOW_START" =~ ^([0-9]{4}-[0-9]{2}-[0-9]{2})?$ ]]
+          then
+            echo "::error::grype_remediation_window_start: expected ''" \
+              "or YYYY-MM-DD"
+            failed=1
+          fi
           case ",${CBOM_LANGUAGES// /}," in
             *,rust,*)
               echo "::error::cbom_languages: cbom-action cannot" \
@@ -1235,6 +1278,9 @@ jobs:
       contents: read
       issues: read  # Maintainer-approved cve-bypass issues
     timeout-minutes: ${{ inputs.audit_timeout_minutes }}
+    outputs:
+      gate_active: ${{ steps.grype-audit.outputs.gate-active }}
+      gate_reason: ${{ steps.grype-audit.outputs.gate-reason }}
     steps:
       - name: 'Load egress allow-list'
         # yamllint disable-line rule:line-length
@@ -1261,11 +1307,13 @@ jobs:
       # variable, keeps findings from failing the job, so a pull request
       # can proceed while a newly published CVE in an untouched
       # transitive dependency awaits a fix. grype_gate_when narrows the
-      # gate to changes that touch dependencies.
+      # gate to changes that touch dependencies, and the remediation
+      # window bounds that leniency: a fixed finding gates in any change
+      # once its fix has been available for that many days.
       - name: 'Grype audit SBOM'
         id: grype-audit
         # yamllint disable-line rule:line-length
-        uses: lfreleng-actions/grype-scan-action@7b6b12b60de8ff051f2f8021439c1ef0b82b98c1  # v0.4.0
+        uses: lfreleng-actions/grype-scan-action@5c81b23afb2ea771b2d247807a12d90783328675  # v0.5.0
         with:
           # The JSON document, or the XML one when that is all there is.
           # yamllint disable-line rule:line-length
@@ -1276,6 +1324,10 @@ jobs:
           only-fixed: ${{ inputs.grype_only_fixed }}
           gate-when: ${{ inputs.grype_gate_when }}
           dependency-change-manifest: 'dependency-change.json'
+          # yamllint disable-line rule:line-length
+          remediation-window-days: ${{ inputs.grype_remediation_window_days }}
+          # yamllint disable-line rule:line-length
+          remediation-window-start: ${{ inputs.grype_remediation_window_start }}
           cache-db: ${{ inputs.grype_cache_db }}
           # yamllint disable-line rule:line-length
           permit-fail: ${{ inputs.grype_permit_fail || vars.NO_BLOCK_AUDIT_FAIL == 'true' }}
