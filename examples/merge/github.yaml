@@ -66,3 +66,4 @@ jobs:
     #   # Merged with the baseline list in the same grammar; see README
     #   harden_runner_supplemental_allowlist: ''
     #   harden_runner_supplemental_unpinned: false  # own org only
+    #   harden_runner_extra_endpoints: ''  # inline host[:port], emergencies

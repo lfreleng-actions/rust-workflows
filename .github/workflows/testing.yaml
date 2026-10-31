@@ -369,7 +369,7 @@ jobs:
   # manifest), build and tests pass only if the supplemental list
   # reaches them, through the nested rust-metadata call too. Jobs that
   # reach GitHub alone pass on either list, since harden-runner always
-  # admits GitHub; supplemental-allowlist-wiring covers every step.
+  # admits GitHub; hardening-inputs-wiring covers every step.
   # Both coordinates name a commit and a file, so a fork behaves alike.
   verify-supplemental-allowlist:
     name: 'Verify (supplemental allow-list)'
@@ -391,6 +391,51 @@ jobs:
       # yamllint disable-line rule:line-length
       harden_runner_supplemental_allowlist: 'lfreleng-actions//.github/harden-runner/lfreleng-actions/allow_list.txt@6d4a65c5601afd6c2fbe52bda4b0024b132f265d'  # v0.19.0
       artefact_suffix: '-supplemental'
+
+  # The verify lane in block mode on a baseline that predates the
+  # crates.io hosts, with those hosts given as inline extra endpoints.
+  # The dependencies variant pulls semver from crates.io, and a cold
+  # 'cargo fetch --locked' of it contacts index.crates.io and
+  # static.crates.io alone. The 2026-07-29 baseline carries
+  # static.rust-lang.org, so rust-metadata (an offline
+  # 'cargo metadata --no-deps') passes on it, while build and tests
+  # pass only if the inline entries reach them. The pinned test runner,
+  # coverage and auditable values install no cargo tool, so crates.io
+  # is the leg's only egress beyond the GitHub domains harden-runner
+  # always admits. The nested rust-metadata and check-release calls
+  # reach no crates.io host here, so this leg does not prove their
+  # forwarding; hardening-inputs-wiring covers it.
+  verify-extra-endpoints:
+    name: 'Verify (extra endpoints)'
+    # Granted for the same reason as verify-release-file above.
+    permissions:
+      contents: read
+      pull-requests: read  # repository-metadata-action queries PR data
+      issues: read  # grype-scan-action reads cve-bypass issues
+    uses: $/.github/workflows/build-test.yaml
+    with:
+      repository: 'lfreleng-actions/test-rust-project'
+      ref: 'df3d10b10c86d57e323f1042e246417baf684e7f'
+      path_prefix: 'variants/dependencies'
+      workspace: false
+      lockfile_required: true
+      test_matrix: 'project'
+      # Install no cargo tool, so crates.io is the only egress beyond
+      # the GitHub domains harden-runner always admits.
+      test_runner: 'cargo'
+      coverage: false
+      auditable: false
+      audit_enabled: false
+      sbom_enabled: false
+      harden_runner_egress: 'block'
+      # yamllint disable-line rule:line-length
+      harden_runner_allowlist: 'lfreleng-actions//.github/harden-runner/lfreleng-actions/allow_list.txt@886b0172ba2292fb3f3c76a3219ce85ff62cba39'
+      harden_runner_extra_endpoints: |
+        # Absent from the 2026-07-29 baseline above
+        crates.io:443
+        index.crates.io:443
+        static.crates.io:443
+      artefact_suffix: '-extra-endpoints'
 
   # The verify lane hands both window inputs to the Grype action. The
   # window leg above proves the days arrive, through the gate the
@@ -447,14 +492,18 @@ jobs:
           exit "$failed"
 
   # Every harden-runner-block-action step in the five reusable
-  # workflows merges the supplemental allow-list, and every nested
-  # '$/' call forwards it. The live leg above can only prove the jobs
-  # that need more than GitHub; a step or call missed here would leave
-  # its job on the baseline alone, failing only for the projects whose
-  # list carries a host that job needs. The steps are counted, not
-  # listed, so a job added later without the wiring fails here.
-  supplemental-allowlist-wiring:
-    name: 'Supplemental Allow-list Wiring'
+  # workflows merges the supplemental allow-list and the inline extra
+  # endpoints, and every nested '$/' call forwards both. The live legs
+  # above can only prove the jobs that need more than GitHub; a step or
+  # call missed here would leave its job on the baseline alone, failing
+  # only for the projects whose list or entries carry a host that job
+  # needs. The steps are counted, not listed, so a job added later
+  # without the wiring fails here. Every reference to the action must
+  # also name one commit: a step left on a release older than v0.15.0
+  # gets extra_endpoints as an undeclared input, which the runner only
+  # warns about, and that job's allow-list never sees the entries.
+  hardening-inputs-wiring:
+    name: 'Hardening Inputs Wiring'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -472,22 +521,45 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: 'Every lane step and call carries the supplemental list'
+      - name: 'Every action reference names one commit'
         shell: bash
         run: |
-          # Every lane step and call carries the supplemental list
+          # Every action reference names one commit
+          set -euo pipefail
+          # Anchored on 'uses:', so this script's own text is no match.
+          pattern='uses:[[:space:]]+[^[:space:]]*harden-runner-block-action@'
+          refs="$(grep -rhoE "${pattern}[^[:space:]]+" .github/workflows \
+            | sed 's/.*@//' | sort | uniq -c)"
+          echo "$refs"
+          if [ -z "$refs" ]; then
+            echo "::error::No harden-runner-block-action reference found"
+            exit 1
+          fi
+          if [ "$(wc -l <<< "$refs")" -ne 1 ]; then
+            echo "::error::harden-runner-block-action references name" \
+              "more than one commit"
+            exit 1
+          fi
+          echo "✅ Every reference names ${refs##* }"
+
+      - name: 'Every lane step and call carries the hardening inputs'
+        shell: bash
+        run: |
+          # Every lane step and call carries the hardening inputs
           set -euo pipefail
           failed=0
           # Split so the runner does not evaluate the expressions.
           d='$'
           list='harden_runner_supplemental_allowlist'
           unpinned='harden_runner_supplemental_unpinned'
+          extra='harden_runner_extra_endpoints'
           keys=(supplemental_config supplemental_required
-            supplemental_unpinned)
+            supplemental_unpinned extra_endpoints)
           wants=(
             "${d}{{ inputs.$list }}"
             "${d}{{ inputs.$list != '' && 'true' || 'false' }}"
             "${d}{{ inputs.$unpinned && 'true' || 'false' }}"
+            "${d}{{ inputs.$extra }}"
           )
           steps='.steps[]?
             | select((.uses // "") | test("harden-runner-block-action@"))'
@@ -496,7 +568,7 @@ jobs:
           for file in build-test build-test-release merge \
             rust-metadata release-check; do
             file=".github/workflows/$file.yaml"
-            for input in "$list" "$unpinned"; do
+            for input in "$list" "$unpinned" "$extra"; do
               if [ "$(yq ".on.workflow_call.inputs | has(\"$input\")" \
                 "$file")" != 'true' ]; then
                 echo "::error file=$file::Declares no $input input"
@@ -523,7 +595,7 @@ jobs:
               fi
             done
             nested="$(yq "[$calls] | length" "$file")"
-            for input in "$list" "$unpinned"; do
+            for input in "$list" "$unpinned" "$extra"; do
               missing="$(WANT="${d}{{ inputs.$input }}" yq "$calls
                 | select(.value.with.$input != strenv(WANT)) | .key" \
                 "$file" | paste -sd ' ')"
