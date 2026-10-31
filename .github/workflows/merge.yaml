@@ -367,6 +367,22 @@ on:
         type: string
         # yamllint disable-line rule:line-length
         default: 'lfreleng-actions//.github/harden-runner/lfreleng-actions/allow_list.txt@6d4a65c5601afd6c2fbe52bda4b0024b132f265d'  # v0.19.0
+      harden_runner_supplemental_allowlist:
+        description: >-
+          Extra harden-runner allow-list merged with
+          harden_runner_allowlist, in the same coordinate grammar.
+          Empty adds nothing
+        required: false
+        type: string
+        default: ''
+      harden_runner_supplemental_unpinned:
+        description: >-
+          Let harden_runner_supplemental_allowlist omit '@ref' and
+          follow its default branch; only a list in the caller's own
+          organisation qualifies
+        required: false
+        type: boolean
+        default: false
 
       # --- Gerrit-aware checkout (empty unless dispatched via Gerrit) ---
       gerrit_refspec:
@@ -474,6 +490,23 @@ jobs:
           fi
           echo "Gerrit inputs validated ✅"
 
+      - name: 'Require a baseline for the supplemental allow-list'
+        # harden-runner-block-action refuses a supplemental list without
+        # a baseline 'config'; fail once here rather than in every job.
+        if: inputs.harden_runner_supplemental_allowlist != ''
+        shell: bash
+        env:
+          BASELINE: ${{ inputs.harden_runner_allowlist }}
+        run: |
+          # Require a baseline for the supplemental allow-list
+          if [ -z "${BASELINE}" ]; then
+            echo "::error::harden_runner_supplemental_allowlist is set" \
+              "but harden_runner_allowlist is empty; the supplemental" \
+              "list extends a baseline and cannot replace it"
+            exit 1
+          fi
+          echo "Supplemental allow-list has a baseline ✅"
+
       - name: 'Check the merge inputs'
         shell: bash
         env:
@@ -555,6 +588,14 @@ jobs:
         with:
           config: ${{ inputs.harden_runner_allowlist }}
           allow_list_summary: 'false'
+          # yamllint disable-line rule:line-length
+          supplemental_config: ${{ inputs.harden_runner_supplemental_allowlist }}
+          # A caller naming a list depends on it, so its absence fails
+          # here rather than at the first blocked connection.
+          # yamllint disable-line rule:line-length
+          supplemental_required: ${{ inputs.harden_runner_supplemental_allowlist != '' && 'true' || 'false' }}
+          # yamllint disable-line rule:line-length
+          supplemental_unpinned: ${{ inputs.harden_runner_supplemental_unpinned && 'true' || 'false' }}
       - name: 'Harden runner'
         if: inputs.gerrit_refspec != ''
         # yamllint disable-line rule:line-length
@@ -668,6 +709,14 @@ jobs:
         with:
           config: ${{ inputs.harden_runner_allowlist }}
           allow_list_summary: 'false'
+          # yamllint disable-line rule:line-length
+          supplemental_config: ${{ inputs.harden_runner_supplemental_allowlist }}
+          # A caller naming a list depends on it, so its absence fails
+          # here rather than at the first blocked connection.
+          # yamllint disable-line rule:line-length
+          supplemental_required: ${{ inputs.harden_runner_supplemental_allowlist != '' && 'true' || 'false' }}
+          # yamllint disable-line rule:line-length
+          supplemental_unpinned: ${{ inputs.harden_runner_supplemental_unpinned && 'true' || 'false' }}
       - name: 'Harden runner'
         # yamllint disable-line rule:line-length
         uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43  # v2.22.3
@@ -731,6 +780,10 @@ jobs:
       harden_runner_egress: ${{ inputs.harden_runner_egress }}
       harden_runner_allowlist: ${{ inputs.harden_runner_allowlist }}
       # yamllint disable-line rule:line-length
+      harden_runner_supplemental_allowlist: ${{ inputs.harden_runner_supplemental_allowlist }}
+      # yamllint disable-line rule:line-length
+      harden_runner_supplemental_unpinned: ${{ inputs.harden_runner_supplemental_unpinned }}
+      # yamllint disable-line rule:line-length
       gerrit_refspec: ${{ inputs.gerrit_refspec != '' && needs.check-release.outputs.sha || '' }}
       gerrit_project: ${{ inputs.gerrit_project }}
       gerrit_branch: ${{ inputs.gerrit_branch }}
@@ -767,6 +820,10 @@ jobs:
       tag_conflict: ${{ inputs.dry_run && 'warn' || 'fail' }}
       harden_runner_egress: ${{ inputs.harden_runner_egress }}
       harden_runner_allowlist: ${{ inputs.harden_runner_allowlist }}
+      # yamllint disable-line rule:line-length
+      harden_runner_supplemental_allowlist: ${{ inputs.harden_runner_supplemental_allowlist }}
+      # yamllint disable-line rule:line-length
+      harden_runner_supplemental_unpinned: ${{ inputs.harden_runner_supplemental_unpinned }}
       # The Gerrit path checks out the commit resolve-commit chose,
       # never the branch tip, which a later merge may already have
       # moved.
@@ -796,6 +853,14 @@ jobs:
         with:
           config: ${{ inputs.harden_runner_allowlist }}
           allow_list_summary: 'false'
+          # yamllint disable-line rule:line-length
+          supplemental_config: ${{ inputs.harden_runner_supplemental_allowlist }}
+          # A caller naming a list depends on it, so its absence fails
+          # here rather than at the first blocked connection.
+          # yamllint disable-line rule:line-length
+          supplemental_required: ${{ inputs.harden_runner_supplemental_allowlist != '' && 'true' || 'false' }}
+          # yamllint disable-line rule:line-length
+          supplemental_unpinned: ${{ inputs.harden_runner_supplemental_unpinned && 'true' || 'false' }}
       - name: 'Harden runner'
         # yamllint disable-line rule:line-length
         uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43  # v2.22.3
@@ -890,6 +955,14 @@ jobs:
         with:
           config: ${{ inputs.harden_runner_allowlist }}
           allow_list_summary: 'false'
+          # yamllint disable-line rule:line-length
+          supplemental_config: ${{ inputs.harden_runner_supplemental_allowlist }}
+          # A caller naming a list depends on it, so its absence fails
+          # here rather than at the first blocked connection.
+          # yamllint disable-line rule:line-length
+          supplemental_required: ${{ inputs.harden_runner_supplemental_allowlist != '' && 'true' || 'false' }}
+          # yamllint disable-line rule:line-length
+          supplemental_unpinned: ${{ inputs.harden_runner_supplemental_unpinned && 'true' || 'false' }}
       - name: 'Harden runner'
         # yamllint disable-line rule:line-length
         uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43  # v2.22.3
@@ -975,6 +1048,14 @@ jobs:
         with:
           config: ${{ inputs.harden_runner_allowlist }}
           allow_list_summary: 'false'
+          # yamllint disable-line rule:line-length
+          supplemental_config: ${{ inputs.harden_runner_supplemental_allowlist }}
+          # A caller naming a list depends on it, so its absence fails
+          # here rather than at the first blocked connection.
+          # yamllint disable-line rule:line-length
+          supplemental_required: ${{ inputs.harden_runner_supplemental_allowlist != '' && 'true' || 'false' }}
+          # yamllint disable-line rule:line-length
+          supplemental_unpinned: ${{ inputs.harden_runner_supplemental_unpinned && 'true' || 'false' }}
       - name: 'Harden runner'
         # yamllint disable-line rule:line-length
         uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43  # v2.22.3
@@ -1047,6 +1128,14 @@ jobs:
         with:
           config: ${{ inputs.harden_runner_allowlist }}
           allow_list_summary: 'false'
+          # yamllint disable-line rule:line-length
+          supplemental_config: ${{ inputs.harden_runner_supplemental_allowlist }}
+          # A caller naming a list depends on it, so its absence fails
+          # here rather than at the first blocked connection.
+          # yamllint disable-line rule:line-length
+          supplemental_required: ${{ inputs.harden_runner_supplemental_allowlist != '' && 'true' || 'false' }}
+          # yamllint disable-line rule:line-length
+          supplemental_unpinned: ${{ inputs.harden_runner_supplemental_unpinned && 'true' || 'false' }}
       - name: 'Harden runner'
         # yamllint disable-line rule:line-length
         uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43  # v2.22.3
@@ -1209,6 +1298,14 @@ jobs:
         with:
           config: ${{ inputs.harden_runner_allowlist }}
           allow_list_summary: 'false'
+          # yamllint disable-line rule:line-length
+          supplemental_config: ${{ inputs.harden_runner_supplemental_allowlist }}
+          # A caller naming a list depends on it, so its absence fails
+          # here rather than at the first blocked connection.
+          # yamllint disable-line rule:line-length
+          supplemental_required: ${{ inputs.harden_runner_supplemental_allowlist != '' && 'true' || 'false' }}
+          # yamllint disable-line rule:line-length
+          supplemental_unpinned: ${{ inputs.harden_runner_supplemental_unpinned && 'true' || 'false' }}
       - name: 'Harden runner'
         # yamllint disable-line rule:line-length
         uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43  # v2.22.3
@@ -1293,6 +1390,14 @@ jobs:
         with:
           config: ${{ inputs.harden_runner_allowlist }}
           allow_list_summary: 'false'
+          # yamllint disable-line rule:line-length
+          supplemental_config: ${{ inputs.harden_runner_supplemental_allowlist }}
+          # A caller naming a list depends on it, so its absence fails
+          # here rather than at the first blocked connection.
+          # yamllint disable-line rule:line-length
+          supplemental_required: ${{ inputs.harden_runner_supplemental_allowlist != '' && 'true' || 'false' }}
+          # yamllint disable-line rule:line-length
+          supplemental_unpinned: ${{ inputs.harden_runner_supplemental_unpinned && 'true' || 'false' }}
       - name: 'Harden runner'
         # yamllint disable-line rule:line-length
         uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43  # v2.22.3
@@ -1475,6 +1580,14 @@ jobs:
         with:
           config: ${{ inputs.harden_runner_allowlist }}
           allow_list_summary: 'false'
+          # yamllint disable-line rule:line-length
+          supplemental_config: ${{ inputs.harden_runner_supplemental_allowlist }}
+          # A caller naming a list depends on it, so its absence fails
+          # here rather than at the first blocked connection.
+          # yamllint disable-line rule:line-length
+          supplemental_required: ${{ inputs.harden_runner_supplemental_allowlist != '' && 'true' || 'false' }}
+          # yamllint disable-line rule:line-length
+          supplemental_unpinned: ${{ inputs.harden_runner_supplemental_unpinned && 'true' || 'false' }}
       - name: 'Harden runner'
         # yamllint disable-line rule:line-length
         uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43  # v2.22.3
@@ -1592,6 +1705,14 @@ jobs:
         with:
           config: ${{ inputs.harden_runner_allowlist }}
           allow_list_summary: 'false'
+          # yamllint disable-line rule:line-length
+          supplemental_config: ${{ inputs.harden_runner_supplemental_allowlist }}
+          # A caller naming a list depends on it, so its absence fails
+          # here rather than at the first blocked connection.
+          # yamllint disable-line rule:line-length
+          supplemental_required: ${{ inputs.harden_runner_supplemental_allowlist != '' && 'true' || 'false' }}
+          # yamllint disable-line rule:line-length
+          supplemental_unpinned: ${{ inputs.harden_runner_supplemental_unpinned && 'true' || 'false' }}
       - name: 'Harden runner'
         # yamllint disable-line rule:line-length
         uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43  # v2.22.3

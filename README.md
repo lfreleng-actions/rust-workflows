@@ -138,6 +138,9 @@ workflow. The defaults gate; the inputs below relax them.
 | `version_source`                              | release        | `manifest`                             | `tag`: the tag sets the version, and `Cargo.toml` keeps `0.0.0` (see "Model A versions")                                                            |
 | `dry_run`                                     | release, merge | `false`                                | Verify everything, publish and tag nothing                                                                                                          |
 | `harden_runner_egress`                        | all            | `block`                                | `audit` logs egress instead of blocking it                                                                                                          |
+| `harden_runner_allowlist`                     | all            | pinned organisation list               | Baseline egress allow-list; see [Runner hardening](#runner-hardening)                                                                               |
+| `harden_runner_supplemental_allowlist`        | all            | `''`                                   | Extra allow-list merged with the baseline, not substituted for it                                                                                   |
+| `harden_runner_supplemental_unpinned`         | all            | `false`                                | Let the supplemental list omit `@ref` and follow its default branch; the caller's organisation alone qualifies                                      |
 
 <!-- markdownlint-enable MD013 -->
 
@@ -185,6 +188,63 @@ With `grype_gate_when`, `grype_fail_on`, `grype_only_fixed` and
 `grype_permit_fail` these cover the common cases, and maintainers can
 approve a bypass for a single CVE through a `cve-bypass` issue, which
 the action honours.
+
+## Runner hardening
+
+Every job hardens its runner with `harden-runner`, by default in
+`block` mode, loading its egress allow-list through
+[harden-runner-block-action](https://github.com/lfreleng-actions/harden-runner-block-action).
+`harden_runner_allowlist` names the baseline: by default the
+organisation list, pinned to a commit. A project that needs extra
+endpoints, such as a package host its tests reach, names its own list
+in `harden_runner_supplemental_allowlist`. Every job merges that list
+with the baseline rather than substituting it, so the project keeps
+following the organisation list and adds what it alone needs.
+
+Both inputs take the action's `config` coordinate grammar; see
+[pinned allow-list via config](https://github.com/lfreleng-actions/harden-runner-block-action#pinned-allow-list-via-config-git-sha-pinnable).
+A pinned list names a ref:
+
+<!-- markdownlint-disable MD013 -->
+
+```yaml
+    with:
+      # yamllint disable-line rule:line-length
+      harden_runner_supplemental_allowlist: 'my-org/my-repo//.github/harden-runner/allow_list.txt@<commit sha>'
+```
+
+<!-- markdownlint-enable MD013 -->
+
+An unpinned list follows its repository's default branch, so the
+project can change it without a pin bump in every caller:
+
+```yaml
+    with:
+      harden_runner_supplemental_allowlist: '//'
+      harden_runner_supplemental_unpinned: true
+```
+
+`//` reads the caller organisation's `.github` repository at its
+default branch: `.github/harden-runner/<org>/allow_list.txt`, then
+`.github/harden-runner/allow_list.txt`.
+
+The action trusts an unpinned list from the caller's own organisation
+and no other. The comparison is exact and case-sensitive, so `//`,
+which takes the caller's organisation, is the form the action is least
+apt to refuse. A list in any other organisation must name a ref, and
+should name a commit SHA: the action accepts a branch or tag as
+pinned, but a branch or tag can move and a commit cannot.
+
+Naming a list makes every job depend on it: if the list can't load,
+the job fails at once rather than at its first blocked connection. A
+supplemental list with an empty `harden_runner_allowlist` fails the
+run, since it extends a baseline and cannot replace one.
+
+A run inside a fork takes the fork's owner as the organisation, so
+there an unpinned list is missing (`//`) or refused as
+cross-organisation. Pull requests from forks run as the base
+repository, so this does not affect them. Projects whose contributors run the
+lanes in their own forks should pin.
 
 ## Publishing to crates.io
 
@@ -398,6 +458,12 @@ repository at the commit already running, against
 - the merge lane as a dry run, on a commit without a release file;
 - the merge lane's release path as a dry run, on a commit that adds
   `releases/workspace-0.1.0.yaml` for the `workspace` variant;
+- a static check that every `harden-runner-block-action` step in the
+  five reusable workflows merges the supplemental allow-list, and that
+  every nested call forwards both supplemental inputs;
+- the verify lane in `block` mode with the baseline and supplemental
+  allow-lists inverted, so the jobs that fetch toolchains and crates
+  fail unless the supplemental list reaches them;
 - a final job that inspects the artefacts the lanes left behind and
   the merge calls' outputs.
 

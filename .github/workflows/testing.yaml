@@ -361,6 +361,37 @@ jobs:
       grype_remediation_window_start: '2026-10-29'
       artefact_suffix: '-grype-window'
 
+  # The verify lane with the two allow-lists inverted, in block mode:
+  # the baseline is the Gerrit-servers list, which carries none of the
+  # crates.io or static.rust-lang.org hosts, and the supplemental list
+  # is the organisation list that does. Merged, they give the
+  # organisation list again, so rust-metadata (which reads the channel
+  # manifest), build and tests pass only if the supplemental list
+  # reaches them, through the nested rust-metadata call too. Jobs that
+  # reach GitHub alone pass on either list, since harden-runner always
+  # admits GitHub; supplemental-allowlist-wiring covers every step.
+  # Both coordinates name a commit and a file, so a fork behaves alike.
+  verify-supplemental-allowlist:
+    name: 'Verify (supplemental allow-list)'
+    # Granted for the same reason as verify-release-file above.
+    permissions:
+      contents: read
+      pull-requests: read  # repository-metadata-action queries PR data
+      issues: read  # grype-scan-action reads cve-bypass issues
+    uses: $/.github/workflows/build-test.yaml
+    with:
+      repository: 'lfreleng-actions/test-rust-project'
+      ref: 'df3d10b10c86d57e323f1042e246417baf684e7f'
+      test_matrix: 'project'
+      audit_enabled: false
+      sbom_enabled: false
+      harden_runner_egress: 'block'
+      # yamllint disable-line rule:line-length
+      harden_runner_allowlist: 'lfreleng-actions//.github/harden-runner/lf-gerrit-servers/gerrit_servers.txt@6d4a65c5601afd6c2fbe52bda4b0024b132f265d'  # v0.19.0
+      # yamllint disable-line rule:line-length
+      harden_runner_supplemental_allowlist: 'lfreleng-actions//.github/harden-runner/lfreleng-actions/allow_list.txt@6d4a65c5601afd6c2fbe52bda4b0024b132f265d'  # v0.19.0
+      artefact_suffix: '-supplemental'
+
   # The verify lane hands both window inputs to the Grype action. The
   # window leg above proves the days arrive, through the gate the
   # action reports; no output reflects the start date unless a finding
@@ -412,6 +443,98 @@ jobs:
               echo "::error::The verify lane declares no $input input"
               failed=1
             fi
+          done
+          exit "$failed"
+
+  # Every harden-runner-block-action step in the five reusable
+  # workflows merges the supplemental allow-list, and every nested
+  # '$/' call forwards it. The live leg above can only prove the jobs
+  # that need more than GitHub; a step or call missed here would leave
+  # its job on the baseline alone, failing only for the projects whose
+  # list carries a host that job needs. The steps are counted, not
+  # listed, so a job added later without the wiring fails here.
+  supplemental-allowlist-wiring:
+    name: 'Supplemental Allow-list Wiring'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    timeout-minutes: 5
+    steps:
+      - name: 'Harden runner'
+        # yamllint disable-line rule:line-length
+        uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43  # v2.22.3
+        with:
+          egress-policy: 'audit'
+
+      - name: 'Checkout repository'
+        # yamllint disable-line rule:line-length
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: 'Every lane step and call carries the supplemental list'
+        shell: bash
+        run: |
+          # Every lane step and call carries the supplemental list
+          set -euo pipefail
+          failed=0
+          # Split so the runner does not evaluate the expressions.
+          d='$'
+          list='harden_runner_supplemental_allowlist'
+          unpinned='harden_runner_supplemental_unpinned'
+          keys=(supplemental_config supplemental_required
+            supplemental_unpinned)
+          wants=(
+            "${d}{{ inputs.$list }}"
+            "${d}{{ inputs.$list != '' && 'true' || 'false' }}"
+            "${d}{{ inputs.$unpinned && 'true' || 'false' }}"
+          )
+          steps='.steps[]?
+            | select((.uses // "") | test("harden-runner-block-action@"))'
+          calls='.jobs | to_entries[]
+            | select((.value.uses // "") | test("^[$]/"))'
+          for file in build-test build-test-release merge \
+            rust-metadata release-check; do
+            file=".github/workflows/$file.yaml"
+            for input in "$list" "$unpinned"; do
+              if [ "$(yq ".on.workflow_call.inputs | has(\"$input\")" \
+                "$file")" != 'true' ]; then
+                echo "::error file=$file::Declares no $input input"
+                failed=1
+              fi
+            done
+            count="$(yq "[.jobs[] | $steps] | length" "$file")"
+            if [ "$count" -eq 0 ]; then
+              echo "::error file=$file::No harden-runner-block-action step"
+              failed=1
+            fi
+            for i in "${!keys[@]}"; do
+              key="${keys[$i]}"
+              missing="$(WANT="${wants[$i]}" yq ".jobs | to_entries[]
+                | select([.value | $steps
+                  | select(.with.$key != strenv(WANT))] | length > 0)
+                | .key" "$file" | paste -sd ' ')"
+              if [ -n "$missing" ]; then
+                echo "::error file=$file::$key is not" \
+                  "'${wants[$i]}' in job(s): $missing"
+                failed=1
+              else
+                echo "✅ $file: $key on all $count step(s)"
+              fi
+            done
+            nested="$(yq "[$calls] | length" "$file")"
+            for input in "$list" "$unpinned"; do
+              missing="$(WANT="${d}{{ inputs.$input }}" yq "$calls
+                | select(.value.with.$input != strenv(WANT)) | .key" \
+                "$file" | paste -sd ' ')"
+              if [ -n "$missing" ]; then
+                echo "::error file=$file::Call(s) not forwarding" \
+                  "$input: $missing"
+                failed=1
+              else
+                echo "✅ $file: $nested '\$/' call(s) forward $input"
+              fi
+            done
           done
           exit "$failed"
 
