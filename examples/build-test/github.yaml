@@ -101,3 +101,6 @@ jobs:
     #   cbom_enabled: false
     #
     #   harden_runner_egress: 'block' # 'block' (default) or 'audit'
+    #   # Merged with the baseline list in the same grammar; see README
+    #   harden_runner_supplemental_allowlist: ''
+    #   harden_runner_supplemental_unpinned: false  # own org only
