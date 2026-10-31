@@ -595,38 +595,38 @@ match the Python family where the meaning matches.
 
 <!-- markdownlint-disable MD013 -->
 
-| Input                                                                                                                            | Feeds                 | Default                                                              |
-| -------------------------------------------------------------------------------------------------------------------------------- | --------------------- | -------------------------------------------------------------------- |
-| `repository`, `ref`                                                                                                              | checkout              | `''`                                                                 |
-| `path_prefix`, `manifest_path`                                                                                                   | all Rust jobs         | `.`, `Cargo.toml`                                                    |
-| `workspace`, `packages`, `exclude`                                                                                               | build, tests          | `true`, `''`, `''`                                                   |
-| `features`, `all_features`, `no_default_features`                                                                                | build, tests          | `''`, `false`, `false`                                               |
-| `toolchain`                                                                                                                      | all Rust jobs         | `''` (project toolchain)                                             |
-| `lockfile_required`                                                                                                              | all Rust jobs         | `false` (D5)                                                         |
-| `setup_script`                                                                                                                   | build, tests          | `''`                                                                 |
-| `target`, `profile`, `cargo_args`, `binaries`                                                                                    | build                 | `''`, `release`, `''`, `false`                                       |
-| `tests_enabled`, `test_matrix`                                                                                                   | tests                 | `true`, `msrv`                                                       |
-| `test_runner`, `test_args`, `doc_tests`                                                                                          | tests                 | `cargo`, `''`, `true`                                                |
-| `coverage`                                                                                                                       | tests                 | `false`                                                              |
-| `test_permit_fail`                                                                                                               | tests                 | `false`                                                              |
-| `audit_enabled`, `audit_permit_fail`                                                                                             | audit                 | `true`, `false`                                                      |
-| `audit_ignore_vulns`, `audit_allow_list_path`                                                                                    | audit                 | `''`                                                                 |
-| `deny_enabled`, `deny_checks`                                                                                                    | audit (`cargo deny`)  | `false`, `advisories bans licenses sources`                          |
-| `sbom_enabled`, `sbom_include_dev`, `sbom_format`                                                                                | sbom                  | `true`, `false` (build-dependencies; Q13), `both`                    |
-| `grype_enabled`, `grype_fail_on`, `grype_permit_fail`                                                                            | grype                 | `true`, `medium`, `false` (falls back to `vars.NO_BLOCK_AUDIT_FAIL`) |
-| `grype_dependency_policy`, `grype_transitive_fail_on`                                                                            | grype                 | `declared`, `critical` (Q13)                                         |
-| `harden_runner_egress`, `harden_runner_allowlist`, `harden_runner_supplemental_allowlist`, `harden_runner_supplemental_unpinned` | harden-runner         | `block`, pinned organisation list, `''`, `false`                     |
-| `gerrit_refspec`, `gerrit_project`, `gerrit_branch`, `gerrit_url`                                                                | Gerrit-aware checkout | `''`                                                                 |
-| `gerrit_patchset_revision` (merge lane)                                                                                          | resolve-commit        | `''` (Q8)                                                            |
-| `runners`                                                                                                                        | build, tests          | `[{"runner":"ubuntu-latest","arch":"x64"}]` (D4)                     |
-| `cache`                                                                                                                          | build, tests          | `false` (D1)                                                         |
-| `build_timeout_minutes`, `test_timeout_minutes`                                                                                  | build, tests          | `20`, `20` (D6)                                                      |
-| `audit_timeout_minutes`                                                                                                          | audit, sbom, grype    | `10` (D6)                                                            |
-| `auditable`                                                                                                                      | build                 | `false`                                                              |
-| `grype_gate_when`, `grype_only_fixed`, `grype_cache_db`                                                                          | grype                 | `dependencies-changed`, `true`, `true` (Q13)                         |
-| `grype_remediation_window_days`, `grype_remediation_window_start`                                                                | grype                 | `14`, `''` (Q13)                                                     |
-| `cbom_enabled`, `cbom_languages`, `cbom_timeout_minutes`                                                                         | cbom                  | `false`, `''`, `30` (Q13)                                            |
-| `artefact_suffix`                                                                                                                | every artefact name   | `''`                                                                 |
+| Input                                                                                                                                                             | Feeds                 | Default                                                              |
+| ----------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------- | -------------------------------------------------------------------- |
+| `repository`, `ref`                                                                                                                                               | checkout              | `''`                                                                 |
+| `path_prefix`, `manifest_path`                                                                                                                                    | all Rust jobs         | `.`, `Cargo.toml`                                                    |
+| `workspace`, `packages`, `exclude`                                                                                                                                | build, tests          | `true`, `''`, `''`                                                   |
+| `features`, `all_features`, `no_default_features`                                                                                                                 | build, tests          | `''`, `false`, `false`                                               |
+| `toolchain`                                                                                                                                                       | all Rust jobs         | `''` (project toolchain)                                             |
+| `lockfile_required`                                                                                                                                               | all Rust jobs         | `false` (D5)                                                         |
+| `setup_script`                                                                                                                                                    | build, tests          | `''`                                                                 |
+| `target`, `profile`, `cargo_args`, `binaries`                                                                                                                     | build                 | `''`, `release`, `''`, `false`                                       |
+| `tests_enabled`, `test_matrix`                                                                                                                                    | tests                 | `true`, `msrv`                                                       |
+| `test_runner`, `test_args`, `doc_tests`                                                                                                                           | tests                 | `cargo`, `''`, `true`                                                |
+| `coverage`                                                                                                                                                        | tests                 | `false`                                                              |
+| `test_permit_fail`                                                                                                                                                | tests                 | `false`                                                              |
+| `audit_enabled`, `audit_permit_fail`                                                                                                                              | audit                 | `true`, `false`                                                      |
+| `audit_ignore_vulns`, `audit_allow_list_path`                                                                                                                     | audit                 | `''`                                                                 |
+| `deny_enabled`, `deny_checks`                                                                                                                                     | audit (`cargo deny`)  | `false`, `advisories bans licenses sources`                          |
+| `sbom_enabled`, `sbom_include_dev`, `sbom_format`                                                                                                                 | sbom                  | `true`, `false` (build-dependencies; Q13), `both`                    |
+| `grype_enabled`, `grype_fail_on`, `grype_permit_fail`                                                                                                             | grype                 | `true`, `medium`, `false` (falls back to `vars.NO_BLOCK_AUDIT_FAIL`) |
+| `grype_dependency_policy`, `grype_transitive_fail_on`                                                                                                             | grype                 | `declared`, `critical` (Q13)                                         |
+| `harden_runner_egress`, `harden_runner_allowlist`, `harden_runner_supplemental_allowlist`, `harden_runner_supplemental_unpinned`, `harden_runner_extra_endpoints` | harden-runner         | `block`, pinned organisation list, `''`, `false`, `''`               |
+| `gerrit_refspec`, `gerrit_project`, `gerrit_branch`, `gerrit_url`                                                                                                 | Gerrit-aware checkout | `''`                                                                 |
+| `gerrit_patchset_revision` (merge lane)                                                                                                                           | resolve-commit        | `''` (Q8)                                                            |
+| `runners`                                                                                                                                                         | build, tests          | `[{"runner":"ubuntu-latest","arch":"x64"}]` (D4)                     |
+| `cache`                                                                                                                                                           | build, tests          | `false` (D1)                                                         |
+| `build_timeout_minutes`, `test_timeout_minutes`                                                                                                                   | build, tests          | `20`, `20` (D6)                                                      |
+| `audit_timeout_minutes`                                                                                                                                           | audit, sbom, grype    | `10` (D6)                                                            |
+| `auditable`                                                                                                                                                       | build                 | `false`                                                              |
+| `grype_gate_when`, `grype_only_fixed`, `grype_cache_db`                                                                                                           | grype                 | `dependencies-changed`, `true`, `true` (Q13)                         |
+| `grype_remediation_window_days`, `grype_remediation_window_start`                                                                                                 | grype                 | `14`, `''` (Q13)                                                     |
+| `cbom_enabled`, `cbom_languages`, `cbom_timeout_minutes`                                                                                                          | cbom                  | `false`, `''`, `30` (Q13)                                            |
+| `artefact_suffix`                                                                                                                                                 | every artefact name   | `''`                                                                 |
 
 <!-- markdownlint-enable MD013 -->
 
@@ -693,7 +693,10 @@ caller's own organisation alone, so a project changes its list without
 a pin bump in every caller. The lanes derive the action's
 `supplemental_required` rather than expose it: naming a list sets it,
 so a missing list fails each job at load time, not at its first
-blocked connection.
+blocked connection. `harden_runner_extra_endpoints` takes inline
+`host[:port]` entries that every job merges after the supplemental
+list, an emergency fix for one missing host while the lasting change
+to a supplemental list or the baseline goes through review.
 
 ### Q13: SBOM and Grype
 
@@ -856,13 +859,19 @@ changes once upstream support exists.
     branch, and skip wherever unreviewed workflow changes on a branch
     of this repository would run with them;
   - a static check that each of the five reusable workflows declares
-    both supplemental allow-list inputs, passes `supplemental_config`,
-    `supplemental_required` and `supplemental_unpinned` to every
-    `harden-runner-block-action` step, and forwards both inputs on
-    every nested `$/` call; and the verify lane in `block` mode with
-    the Gerrit-servers list as the baseline and the organisation list
-    as the supplemental, so `rust-metadata`, build and tests fail
-    unless the merge reaches them;
+    both supplemental allow-list inputs and
+    `harden_runner_extra_endpoints`, passes `supplemental_config`,
+    `supplemental_required`, `supplemental_unpinned` and
+    `extra_endpoints` to every `harden-runner-block-action` step, and
+    forwards all three inputs on every nested `$/` call, and that every
+    reference to the action under `.github/workflows` names the same
+    commit; the verify lane in `block` mode with the Gerrit-servers
+    list as the baseline and the organisation list as the
+    supplemental, so `rust-metadata`, build and tests fail unless the
+    merge reaches them; and the verify lane in `block` mode on the
+    `dependencies` variant, with a baseline that predates the
+    crates.io hosts and those hosts as inline extra endpoints, so
+    build and tests fail unless the entries reach them;
   - a final job that checks the artefacts the lanes left: the resolved
     lockfile, the SBOM contents, the dependency-change sidecar, both
     platforms' binaries, the MSRV leg and the packaged crates. It also

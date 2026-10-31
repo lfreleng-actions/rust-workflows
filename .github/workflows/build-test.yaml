@@ -398,6 +398,14 @@ on:
         required: false
         type: boolean
         default: false
+      harden_runner_extra_endpoints:
+        description: >-
+          Extra egress endpoints written inline, host[:port] tokens
+          separated by spaces or newlines, merged into the allow-list
+          for short-lived fixes. Empty adds nothing
+        required: false
+        type: string
+        default: ''
 
       # --- Gerrit-aware checkout (empty unless dispatched via Gerrit) ---
       gerrit_refspec:
@@ -577,7 +585,7 @@ jobs:
     steps:
       - name: 'Load egress allow-list'
         # yamllint disable-line rule:line-length
-        uses: lfreleng-actions/harden-runner-block-action@e5e8179f45aa893b23cc8b5d2e25466355d9c4f8  # v0.14.0
+        uses: lfreleng-actions/harden-runner-block-action@2fed66c9c36c4687c31ca349b925b81ec629673f  # v0.15.0
         with:
           config: ${{ inputs.harden_runner_allowlist }}
           allow_list_summary: 'false'
@@ -589,6 +597,7 @@ jobs:
           supplemental_required: ${{ inputs.harden_runner_supplemental_allowlist != '' && 'true' || 'false' }}
           # yamllint disable-line rule:line-length
           supplemental_unpinned: ${{ inputs.harden_runner_supplemental_unpinned && 'true' || 'false' }}
+          extra_endpoints: ${{ inputs.harden_runner_extra_endpoints }}
       - name: 'Harden runner'
         # yamllint disable-line rule:line-length
         uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43  # v2.22.3
@@ -655,6 +664,7 @@ jobs:
       harden_runner_supplemental_allowlist: ${{ inputs.harden_runner_supplemental_allowlist }}
       # yamllint disable-line rule:line-length
       harden_runner_supplemental_unpinned: ${{ inputs.harden_runner_supplemental_unpinned }}
+      harden_runner_extra_endpoints: ${{ inputs.harden_runner_extra_endpoints }}
       gerrit_refspec: ${{ inputs.gerrit_refspec }}
       gerrit_project: ${{ inputs.gerrit_project }}
       gerrit_branch: ${{ inputs.gerrit_branch }}
@@ -704,6 +714,7 @@ jobs:
       harden_runner_supplemental_allowlist: ${{ inputs.harden_runner_supplemental_allowlist }}
       # yamllint disable-line rule:line-length
       harden_runner_supplemental_unpinned: ${{ inputs.harden_runner_supplemental_unpinned }}
+      harden_runner_extra_endpoints: ${{ inputs.harden_runner_extra_endpoints }}
       # A change refspec is the patch set under test, as rust-metadata
       # read it: a patch set is immutable, and Gerrit is not asked for
       # an unmerged commit by SHA, which the checkout action's
@@ -734,7 +745,7 @@ jobs:
     steps:
       - name: 'Load egress allow-list'
         # yamllint disable-line rule:line-length
-        uses: lfreleng-actions/harden-runner-block-action@e5e8179f45aa893b23cc8b5d2e25466355d9c4f8  # v0.14.0
+        uses: lfreleng-actions/harden-runner-block-action@2fed66c9c36c4687c31ca349b925b81ec629673f  # v0.15.0
         with:
           config: ${{ inputs.harden_runner_allowlist }}
           allow_list_summary: 'false'
@@ -746,6 +757,7 @@ jobs:
           supplemental_required: ${{ inputs.harden_runner_supplemental_allowlist != '' && 'true' || 'false' }}
           # yamllint disable-line rule:line-length
           supplemental_unpinned: ${{ inputs.harden_runner_supplemental_unpinned && 'true' || 'false' }}
+          extra_endpoints: ${{ inputs.harden_runner_extra_endpoints }}
       - name: 'Harden runner'
         # yamllint disable-line rule:line-length
         uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43  # v2.22.3
@@ -884,7 +896,7 @@ jobs:
     steps:
       - name: 'Load egress allow-list'
         # yamllint disable-line rule:line-length
-        uses: lfreleng-actions/harden-runner-block-action@e5e8179f45aa893b23cc8b5d2e25466355d9c4f8  # v0.14.0
+        uses: lfreleng-actions/harden-runner-block-action@2fed66c9c36c4687c31ca349b925b81ec629673f  # v0.15.0
         with:
           config: ${{ inputs.harden_runner_allowlist }}
           allow_list_summary: 'false'
@@ -896,6 +908,7 @@ jobs:
           supplemental_required: ${{ inputs.harden_runner_supplemental_allowlist != '' && 'true' || 'false' }}
           # yamllint disable-line rule:line-length
           supplemental_unpinned: ${{ inputs.harden_runner_supplemental_unpinned && 'true' || 'false' }}
+          extra_endpoints: ${{ inputs.harden_runner_extra_endpoints }}
       - name: 'Harden runner'
         # yamllint disable-line rule:line-length
         uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43  # v2.22.3
@@ -1022,7 +1035,7 @@ jobs:
     steps:
       - name: 'Load egress allow-list'
         # yamllint disable-line rule:line-length
-        uses: lfreleng-actions/harden-runner-block-action@e5e8179f45aa893b23cc8b5d2e25466355d9c4f8  # v0.14.0
+        uses: lfreleng-actions/harden-runner-block-action@2fed66c9c36c4687c31ca349b925b81ec629673f  # v0.15.0
         with:
           config: ${{ inputs.harden_runner_allowlist }}
           allow_list_summary: 'false'
@@ -1034,6 +1047,7 @@ jobs:
           supplemental_required: ${{ inputs.harden_runner_supplemental_allowlist != '' && 'true' || 'false' }}
           # yamllint disable-line rule:line-length
           supplemental_unpinned: ${{ inputs.harden_runner_supplemental_unpinned && 'true' || 'false' }}
+          extra_endpoints: ${{ inputs.harden_runner_extra_endpoints }}
       - name: 'Harden runner'
         # yamllint disable-line rule:line-length
         uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43  # v2.22.3
@@ -1129,7 +1143,7 @@ jobs:
     steps:
       - name: 'Load egress allow-list'
         # yamllint disable-line rule:line-length
-        uses: lfreleng-actions/harden-runner-block-action@e5e8179f45aa893b23cc8b5d2e25466355d9c4f8  # v0.14.0
+        uses: lfreleng-actions/harden-runner-block-action@2fed66c9c36c4687c31ca349b925b81ec629673f  # v0.15.0
         with:
           config: ${{ inputs.harden_runner_allowlist }}
           allow_list_summary: 'false'
@@ -1141,6 +1155,7 @@ jobs:
           supplemental_required: ${{ inputs.harden_runner_supplemental_allowlist != '' && 'true' || 'false' }}
           # yamllint disable-line rule:line-length
           supplemental_unpinned: ${{ inputs.harden_runner_supplemental_unpinned && 'true' || 'false' }}
+          extra_endpoints: ${{ inputs.harden_runner_extra_endpoints }}
       - name: 'Harden runner'
         # yamllint disable-line rule:line-length
         uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43  # v2.22.3
@@ -1365,7 +1380,7 @@ jobs:
     steps:
       - name: 'Load egress allow-list'
         # yamllint disable-line rule:line-length
-        uses: lfreleng-actions/harden-runner-block-action@e5e8179f45aa893b23cc8b5d2e25466355d9c4f8  # v0.14.0
+        uses: lfreleng-actions/harden-runner-block-action@2fed66c9c36c4687c31ca349b925b81ec629673f  # v0.15.0
         with:
           config: ${{ inputs.harden_runner_allowlist }}
           allow_list_summary: 'false'
@@ -1377,6 +1392,7 @@ jobs:
           supplemental_required: ${{ inputs.harden_runner_supplemental_allowlist != '' && 'true' || 'false' }}
           # yamllint disable-line rule:line-length
           supplemental_unpinned: ${{ inputs.harden_runner_supplemental_unpinned && 'true' || 'false' }}
+          extra_endpoints: ${{ inputs.harden_runner_extra_endpoints }}
       - name: 'Harden runner'
         # yamllint disable-line rule:line-length
         uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43  # v2.22.3
@@ -1440,7 +1456,7 @@ jobs:
     steps:
       - name: 'Load egress allow-list'
         # yamllint disable-line rule:line-length
-        uses: lfreleng-actions/harden-runner-block-action@e5e8179f45aa893b23cc8b5d2e25466355d9c4f8  # v0.14.0
+        uses: lfreleng-actions/harden-runner-block-action@2fed66c9c36c4687c31ca349b925b81ec629673f  # v0.15.0
         with:
           config: ${{ inputs.harden_runner_allowlist }}
           allow_list_summary: 'false'
@@ -1452,6 +1468,7 @@ jobs:
           supplemental_required: ${{ inputs.harden_runner_supplemental_allowlist != '' && 'true' || 'false' }}
           # yamllint disable-line rule:line-length
           supplemental_unpinned: ${{ inputs.harden_runner_supplemental_unpinned && 'true' || 'false' }}
+          extra_endpoints: ${{ inputs.harden_runner_extra_endpoints }}
       - name: 'Harden runner'
         # yamllint disable-line rule:line-length
         uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43  # v2.22.3

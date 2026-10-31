@@ -141,6 +141,7 @@ workflow. The defaults gate; the inputs below relax them.
 | `harden_runner_allowlist`                     | all            | pinned organisation list               | Baseline egress allow-list; see [Runner hardening](#runner-hardening)                                                                               |
 | `harden_runner_supplemental_allowlist`        | all            | `''`                                   | Extra allow-list merged with the baseline, not substituted for it                                                                                   |
 | `harden_runner_supplemental_unpinned`         | all            | `false`                                | Let the supplemental list omit `@ref` and follow its default branch; the caller's organisation alone qualifies                                      |
+| `harden_runner_extra_endpoints`               | all            | `''`                                   | Inline `host[:port]` entries merged into the allow-list, for a short-lived fix; see [Inline extra endpoints](#inline-extra-endpoints)               |
 
 <!-- markdownlint-enable MD013 -->
 
@@ -245,6 +246,35 @@ there an unpinned list is missing (`//`) or refused as
 cross-organisation. Pull requests from forks run as the base
 repository, so this does not affect them. Projects whose contributors run the
 lanes in their own forks should pin.
+
+### Inline extra endpoints
+
+`harden_runner_extra_endpoints` is for emergencies: a job blocked by
+one missing host gets a one-line fix in the caller's own workflow,
+reviewed there, while the lasting change goes through review where it
+belongs. A project's standing needs belong in its supplemental list,
+and needs the whole organisation shares belong in the baseline; remove
+the entry once that change lands. The input takes `host[:port]` tokens
+separated by spaces or newlines, with `#` comments, so a block scalar
+reads well:
+
+```yaml
+    with:
+      harden_runner_extra_endpoints: |
+        # Until my-org/.github adds it to the baseline
+        downloads.example.org:443
+```
+
+Every job merges the entries into its allow-list, after any
+supplemental list, and the lanes pass the value through unchanged. The
+action checks each entry as it checks every other: a malformed token
+fails the run, naming `extra_endpoints` and the token, and under its
+default DNS policy the action drops an entry that does not resolve.
+Every job logs the entries it adds. The job that writes the allow-list
+summary (the nested `rust-metadata` in the verify and merge lanes,
+`tag-validate` in the release lane) also lists them there and raises a
+notice, so the stopgap stays visible. See
+[inline extra endpoints](https://github.com/lfreleng-actions/harden-runner-block-action#inline-extra-endpoints).
 
 ## Publishing to crates.io
 
@@ -459,11 +489,17 @@ repository at the commit already running, against
 - the merge lane's release path as a dry run, on a commit that adds
   `releases/workspace-0.1.0.yaml` for the `workspace` variant;
 - a static check that every `harden-runner-block-action` step in the
-  five reusable workflows merges the supplemental allow-list, and that
-  every nested call forwards both supplemental inputs;
+  five reusable workflows merges the supplemental allow-list and the
+  inline extra endpoints, that every nested call forwards all three
+  hardening inputs, and that every reference to the action names the
+  same commit;
 - the verify lane in `block` mode with the baseline and supplemental
   allow-lists inverted, so the jobs that fetch toolchains and crates
   fail unless the supplemental list reaches them;
+- the verify lane in `block` mode on a baseline without the crates.io
+  hosts, which the call adds as inline extra endpoints, so build and
+  tests of the `dependencies` variant fail unless the entries reach
+  them;
 - a final job that inspects the artefacts the lanes left behind and
   the merge calls' outputs.
 
