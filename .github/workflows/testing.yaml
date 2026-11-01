@@ -429,7 +429,7 @@ jobs:
       sbom_enabled: false
       harden_runner_egress: 'block'
       # yamllint disable-line rule:line-length
-      harden_runner_allowlist: 'lfreleng-actions//.github/harden-runner/lfreleng-actions/allow_list.txt@886b0172ba2292fb3f3c76a3219ce85ff62cba39'
+      harden_runner_allowlist: 'lfreleng-actions//.github/harden-runner/lfreleng-actions/allow_list.txt@6d4a65c5601afd6c2fbe52bda4b0024b132f265d'  # v0.19.0
       harden_runner_extra_endpoints: |
         # Absent from the 2026-07-29 baseline above
         crates.io:443
