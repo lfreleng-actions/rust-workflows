@@ -259,9 +259,12 @@ share; projects never call them.
 gerrit-validate -> { repository-metadata | rust-metadata }
 rust-metadata -> { check-release | build }
 build -> { tests | audit | sbom -> grype | cbom }
+repository-metadata -> grype
 ```
 
-- `repository-metadata` stays informational and gates nothing.
+- `repository-metadata` reports on the change and gates nothing
+  itself. It also decides whether the change touched a dependency
+  file, the verdict the `grype` job reads (see below).
 - `tests`, `audit` and `sbom -> grype` run in parallel after `build`;
   none gates another, so a pull request surfaces every failure at once.
 - `check-release` reads any Model B release file the change adds under
@@ -330,7 +333,9 @@ build -> { tests | audit | sbom -> grype | cbom }
   SHA. Any other Gerrit refspec names a merged commit, which every
   job fetches by SHA.
   `repository-metadata` runs beside `rust-metadata` and still reads
-  `ref` itself, since it informs and gates nothing.
+  `ref` itself, since it informs and gates nothing; its
+  dependency-change verdict fails closed when that checkout is not the
+  commit the event names.
 - `build` and `tests` run once per entry in `runners` (D4); `tests`
   multiplies that by the toolchain matrix. `audit`, `sbom` and `grype`
   run once: the lockfile they read is the same on every platform.
@@ -347,15 +352,26 @@ build -> { tests | audit | sbom -> grype | cbom }
   lockfile reads the registry index and runs no crate code; Cargo picks
   a lockfile format the declared `rust-version` can read, so the MSRV
   leg reads it too.
-- The `sbom` job records whether the change touched `Cargo.toml`,
-  `Cargo.lock` or Cargo configuration, comparing the commit under test
-  with its first parent, in a `dependency-change.json` sidecar beside
-  the SBOM. It reads paths NUL-delimited, so a name Git would quote
-  still matches, and without rename detection, so a manifest moved
-  away counts too. Under `grype_gate_when: dependencies-changed`, the
-  verify lane's default, Grype gates when that answer is yes, treats a
-  missing answer as yes, and otherwise reports its findings as
-  warnings until the remediation window closes on each.
+- Under `grype_gate_when: dependencies-changed`, the verify lane's
+  default, `repository-metadata` decides whether the change touched a
+  dependency file, through repository-metadata-action's
+  [dependency change detection](https://github.com/lfreleng-actions/repository-metadata-action#dependency-change-detection)
+  (v0.4.0), and exposes the verdict as its `dependencies_changed`
+  output. It compares a pull request with its base, a push with the
+  commit before it, and a Gerrit change with its parent, across the
+  whole repository, since a workspace root or shared Cargo
+  configuration moves every project in it. Every preset counts unless
+  `grype_dependency_ecosystems` narrows them, and
+  `grype_dependency_patterns` adds paths; `gerrit-validate` refuses an
+  unknown preset name. The `grype` job waits for the verdict and
+  trusts it from a job that succeeded alone. Grype gates when the answer is
+  yes or unresolved (a scheduled or manual run, a checkout of another
+  repository or ref, a missing base, a failed or skipped
+  `repository-metadata` job), and otherwise reports its findings as
+  warnings until the remediation window closes on each. The detector
+  supersedes the `dependency-change.json` sidecar the `sbom` job used
+  to write, which saw `Cargo.toml`, `Cargo.lock` and Cargo
+  configuration alone.
 - `cbom` is advisory (Q13).
 
 ### Q7: Release job graph (Model A)
@@ -625,6 +641,8 @@ match the Python family where the meaning matches.
 | `auditable`                                                                                                                                                       | build                 | `false`                                                              |
 | `grype_gate_when`, `grype_only_fixed`, `grype_cache_db`                                                                                                           | grype                 | `dependencies-changed`, `true`, `true` (Q13)                         |
 | `grype_remediation_window_days`, `grype_remediation_window_start`                                                                                                 | grype                 | `14`, `''` (Q13)                                                     |
+| `grype_dependency_ecosystems`, `grype_dependency_patterns`                                                                                                        | repository-metadata   | `''`, `''` (Q6)                                                      |
+| `grype_bypass_repository`                                                                                                                                         | grype                 | `''` (Q13)                                                           |
 | `cbom_enabled`, `cbom_languages`, `cbom_timeout_minutes`                                                                                                          | cbom                  | `false`, `''`, `30` (Q13)                                            |
 | `artefact_suffix`                                                                                                                                                 | every artefact name   | `''`                                                                 |
 
@@ -648,8 +666,9 @@ failing test or audit because of a repository-wide switch.
 
 The release and merge workflows take the same inputs, except that
 `lockfile_required` defaults to `true` (D5), `cache` does not exist
-(D1), `grype_gate_when`, the remediation window, `grype_cache_db` and
-the CBOM inputs belong to the verify lane alone, and
+(D1), `grype_gate_when`, the dependency-change inputs, the
+remediation window, `grype_cache_db` and the CBOM inputs belong to the
+verify lane alone, and
 `grype_dependency_policy`, `grype_transitive_fail_on` and
 `grype_only_fixed` keep the action's defaults, `all`, `none` and
 `false`: a release scan always gates on the full set and never writes
@@ -755,19 +774,23 @@ The lanes expose the severity threshold, fixed-advisory filtering,
 `permit-fail` and, on the verify lane, `gate-when`, the remediation
 window (v0.5.0, grype-scan-action #45 and #47) and `cache-db`. They
 also expose the provenance controls as `grype_dependency_policy` and
-`grype_transitive_fail_on`. The names follow the lanes' `grype_`
-convention.
+`grype_transitive_fail_on`, and `bypass-repository` as
+`grype_bypass_repository`, which `gerrit-validate` checks is empty or
+`owner/name`. The verify lane feeds `dependencies-changed` from the
+`repository-metadata` verdict (Q6), narrowed by
+`grype_dependency_ecosystems` and `grype_dependency_patterns`. The
+names follow the lanes' `grype_` convention.
 
 The verify lane adopts the change-scoped posture agreed in
 grype-scan-action #10: `grype_gate_when: dependencies-changed`,
 `grype_dependency_policy: declared`, `grype_transitive_fail_on:
 critical`, `grype_only_fixed: true` and
-`grype_remediation_window_days: 14`. A change that touches
-`Cargo.toml`, `Cargo.lock` or `.cargo/config*` gates on the crates the
-project declares at `grype_fail_on` and on inherited crates at
-`critical`. A change that leaves them alone reports findings as
-warnings until a fix has been available for 14 days, then gates as if
-armed; unfixable advisories warn. An unresolvable change signal or
+`grype_remediation_window_days: 14`. A change that touches a
+dependency file (Q6) gates on the crates the project declares at
+`grype_fail_on` and on inherited crates at `critical`. A change that
+leaves them alone reports findings as warnings until a fix has been
+available for 14 days, then gates as if armed; unfixable advisories
+warn. An unresolvable change signal or
 provenance still gates: the action fails closed.
 `grype_remediation_window_start` (`YYYY-MM-DD`, empty by default)
 floors the window clock, so a project that sets it to its adoption day
@@ -811,14 +834,23 @@ changes once upstream support exists.
     `path_prefix`. The root call also enables CBOM, which proves the
     job's wiring and its clean skip on a pure Rust project, not a
     scan;
-  - the verify lane's remediation window on the fixture's merge commit
-    that adds `releases/workspace-0.1.0.yaml` and touches no Cargo
-    file, with the workspace variant selected so the release file
-    matches and a 7-day window, so the dependency-changed gate stays
-    unarmed and the window alone can arm it; and, since no output
-    reflects `grype_remediation_window_start` without a finding of
-    known fix date, a static check that the Grype job passes both
-    window inputs to the action;
+  - the verify lane on the fixture's merge commit that adds
+    `releases/workspace-0.1.0.yaml`, with the workspace variant
+    selected so the release file matches and a 7-day window: a
+    checkout of another repository leaves the dependency-change
+    verdict unresolved, so the gate must arm outright, with no window
+    clause; and the verify lane on this repository's own
+    `tests/fixtures/dependency-change` crate, where the verdict
+    resolves on a pull request, so the gate reports either a touched
+    dependency file or the 7-day window arming it, and on a manual
+    dispatch reports the verdict unresolved. Since no output reflects
+    `grype_remediation_window_start` without a finding of known fix
+    date, a static check covers that the Grype job passes both window
+    inputs to the action, another the dependency-change wiring in all
+    three lanes (the v0.4.0 pin, the detection inputs, the job output,
+    the grype job's `needs` and guarded verdict, no SBOM sidecar, the
+    bypass repository), and a third runs each lane's Grype input check
+    against accepted and refused values;
   - the verify lane's release-file check on the fixture's merge commit
     that adds `releases/workspace-0.1.0.yaml`, with the workspace
     variant selected and the other stages off, which reports release
@@ -873,10 +905,11 @@ changes once upstream support exists.
     crates.io hosts and those hosts as inline extra endpoints, so
     build and tests fail unless the entries reach them;
   - a final job that checks the artefacts the lanes left: the resolved
-    lockfile, the SBOM contents, the dependency-change sidecar, both
-    platforms' binaries, the MSRV leg and the packaged crates. It also
-    checks that the window leg's Grype gate reports itself armed by a
-    7-day window, the verify lane's release-file outputs and the merge
+    lockfile, the SBOM contents, the absence of the old
+    dependency-change sidecar, both platforms' binaries, the MSRV leg
+    and the packaged crates. It also checks the Grype gate both
+    dependency-change legs report, the verify lane's release-file
+    outputs and the merge
     calls'
     outputs: no release on the first, and on
     the second `has_release: true`, version `0.1.0`, tag `v0.1.0`

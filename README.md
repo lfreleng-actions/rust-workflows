@@ -128,7 +128,10 @@ workflow. The defaults gate; the inputs below relax them.
 | `grype_only_fixed`                            | all            | `true` on verify, otherwise `false`    | Report advisories that have no fix as warnings rather than gating                                                                                   |
 | `grype_dependency_policy`                     | all            | `declared` on verify, otherwise `all`  | `declared` gates the crates the project declares and reports inherited ones as warnings                                                             |
 | `grype_transitive_fail_on`                    | all            | `critical` on verify, otherwise `none` | Under `declared`, the lowest severity at which an inherited crate still gates                                                                       |
-| `grype_gate_when`                             | verify         | `dependencies-changed`                 | Gates when the change touches `Cargo.toml`, `Cargo.lock` or `.cargo/config*`, and otherwise reports findings as warnings; `always` gates every scan |
+| `grype_bypass_repository`                     | all            | `''`                                   | `owner/name` holding the approved `cve-bypass` issues; empty reads the calling repository                                                           |
+| `grype_gate_when`                             | verify         | `dependencies-changed`                 | Gates when the change touches a dependency file, and otherwise reports findings as warnings; `always` gates every scan                              |
+| `grype_dependency_ecosystems`                 | verify         | `''`                                   | Comma-separated dependency file presets: `node`, `python`, `go`, `maven`, `gradle`, `rust`, `docker`; empty means all                               |
+| `grype_dependency_patterns`                   | verify         | `''`                                   | Extra dependency file patterns, one per line, added to the presets                                                                                  |
 | `grype_remediation_window_days`               | verify         | `14`                                   | Days a finding stays a warning after its fix became available, in a change that leaves the dependencies alone; empty turns the window off           |
 | `grype_remediation_window_start`              | verify         | `''`                                   | `YYYY-MM-DD` floor for the window clock, such as the adoption day, so an existing backlog gets the full window                                      |
 | `grype_cache_db`                              | verify         | `true`                                 | Grype database cache: `true`, `false`, or restore without saving                                                                                    |
@@ -154,12 +157,12 @@ issues.
 
 The Grype gate can tell the crates a project declares from those it
 inherits, reading the Cargo graph in the SBOM. On the verify lane, by
-default, a change that touches `Cargo.toml`, `Cargo.lock` or
-`.cargo/config*` gates on the crates the project declares at
-`grype_fail_on` and on inherited crates at `critical`. A change that
-leaves them alone reports findings as warnings until a fix has been
-available for 14 days, then gates. Advisories with no fix warn. An
-unresolvable change signal or provenance still gates. Set
+default, a change that touches a dependency file gates on the crates
+the project declares at `grype_fail_on` and on inherited crates at
+`critical`. A change that leaves them alone reports findings as
+warnings until a fix has been available for 14 days, then gates.
+Advisories with no fix warn. An unresolvable change signal or
+provenance still gates. Set
 `grype_remediation_window_start` to the day you adopt the window, so
 an existing backlog gets the full 14 days. To gate on every finding in
 every pull request, as before, opt out:
@@ -170,6 +173,20 @@ every pull request, as before, opt out:
       grype_dependency_policy: 'all'
       grype_only_fixed: false
 ```
+
+The `repository-metadata` job decides whether a change touched a
+dependency file, through repository-metadata-action's
+[dependency change detection](https://github.com/lfreleng-actions/repository-metadata-action#dependency-change-detection).
+It compares a pull request with its base, a push with the commit
+before it, and a Gerrit change with its parent, across the whole
+repository. Every preset counts by default, so a `Dockerfile`,
+`package.json` or `go.mod` beside the crate counts as well as
+`Cargo.toml`, `Cargo.lock` and `.cargo/config*`. Narrow the presets
+with `grype_dependency_ecosystems`, such as `rust`, or add paths with
+`grype_dependency_patterns`. The check fails closed: a scheduled or
+manual run, a checkout of another repository or ref, a missing base
+commit, or a failed `repository-metadata` job leaves the verdict
+unresolved, and Grype then gates every finding.
 
 The release and merge lanes keep the full-set gate: every finding
 gates, under the policy the caller chose, whatever changed. A project
@@ -188,7 +205,8 @@ The action reads the graph from the JSON SBOM, so with
 With `grype_gate_when`, `grype_fail_on`, `grype_only_fixed` and
 `grype_permit_fail` these cover the common cases, and maintainers can
 approve a bypass for a single CVE through a `cve-bypass` issue, which
-the action honours.
+the action honours. Set `grype_bypass_repository` to read those issues
+from one shared repository instead of the calling one.
 
 ## Runner hardening
 
