@@ -1,0 +1,16 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Linux Foundation
+
+# A crate with no dependencies, built from this repository's own
+# checkout so the verify lane can resolve a dependency-change verdict:
+# the lfreleng-actions/test-rust-project legs check out another
+# repository, where the detector cannot resolve one.
+[package]
+name = "lfreleng-dependency-change-fixture"
+version = "0.0.0"
+edition = "2021"
+rust-version = "1.85"
+license = "Apache-2.0"
+publish = false
+
+[dependencies]

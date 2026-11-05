@@ -166,7 +166,9 @@ jobs:
       matrix:
         include:
           # Two platforms, nextest, coverage, binaries and
-          # dependency-scoped Grype gating. The fixture is pure Rust, so
+          # dependency-scoped Grype gating, which a checkout of another
+          # repository leaves unresolved, so the gate arms (see
+          # verify-grype-unresolved). The fixture is pure Rust, so
           # the CBOM job proves its wiring and its clean skip, not a
           # scan: cbom-action has no Rust support, and its own tests
           # cover scanning.
@@ -333,18 +335,19 @@ jobs:
       sbom_enabled: false
       artefact_suffix: '-release-file'
 
-  # The verify lane's remediation window, on the fixture's merge commit
-  # that adds a release file and touches no Cargo file, so the
-  # dependency-changed gate stays unarmed and the window alone can arm
-  # it. A window of 7 days, not the default 14, shows the input reached
-  # the action: the artefacts job checks the gate it reports. Without
-  # the window the gate would report itself inactive. The release file
-  # is the workspace variant's, so the call selects that variant, as
-  # verify-release-file does, and the release-file check passes.
-  # Nothing the action reports depends on the window's start date, so
-  # grype-window-wiring checks that input's pass-through instead.
-  verify-grype-window:
-    name: 'Verify (Grype window)'
+  # The verify lane checking out another repository, where the
+  # repository-metadata job cannot resolve a dependency-change verdict:
+  # HEAD is not the commit the event names. An unresolved verdict must
+  # gate outright, not fall back to the remediation window, so the
+  # artefacts job expects an active gate whose reason names the missing
+  # signal and carries no window clause, though the call sets a window.
+  # The release file is the workspace variant's, so the call selects
+  # that variant, as verify-release-file does, and the release-file
+  # check passes. Nothing the action reports depends on the window's
+  # start date, so grype-window-wiring checks that input's
+  # pass-through instead.
+  verify-grype-unresolved:
+    name: 'Verify (Grype unresolved)'
     # Granted for the same reason as verify-release-file above.
     permissions:
       contents: read
@@ -359,7 +362,32 @@ jobs:
       audit_enabled: false
       grype_remediation_window_days: '7'
       grype_remediation_window_start: '2026-10-29'
-      artefact_suffix: '-grype-window'
+      artefact_suffix: '-grype-unresolved'
+
+  # The verify lane on this repository's own checkout, so HEAD is the
+  # commit the event names and the repository-metadata job can resolve
+  # a dependency-change verdict. The crate under
+  # tests/fixtures/dependency-change has no dependencies, so Grype has
+  # little to find. On a pull request the artefacts job expects a
+  # resolved reason: either the change touched a dependency file, or it
+  # did not and the 7-day window, not the default 14, armed the gate,
+  # which shows that input reached the action. On a manual dispatch
+  # there is no change to compare, so it expects the unresolved reason.
+  verify-dependency-change:
+    name: 'Verify (dependency change)'
+    # Granted for the same reason as verify-release-file above.
+    permissions:
+      contents: read
+      pull-requests: read  # repository-metadata-action queries PR data
+      issues: read  # grype-scan-action reads cve-bypass issues
+    uses: $/.github/workflows/build-test.yaml
+    with:
+      path_prefix: 'tests/fixtures/dependency-change'
+      workspace: false
+      tests_enabled: false
+      audit_enabled: false
+      grype_remediation_window_days: '7'
+      artefact_suffix: '-dependency-change'
 
   # The verify lane with the two allow-lists inverted, in block mode:
   # the baseline is the Gerrit-servers list, which carries none of the
@@ -438,9 +466,10 @@ jobs:
       artefact_suffix: '-extra-endpoints'
 
   # The verify lane hands both window inputs to the Grype action. The
-  # window leg above proves the days arrive, through the gate the
-  # action reports; no output reflects the start date unless a finding
-  # with a known fix date turns up, which the fixture cannot promise.
+  # dependency-change leg above proves the days arrive, through the
+  # gate the action reports, on a change that leaves the gate unarmed;
+  # no output reflects the start date unless a finding with a known fix
+  # date turns up, which the fixture cannot promise.
   # Dropping that mapping would lose adopters their backlog's grace
   # period with every run still green, so assert the wiring itself.
   grype-window-wiring:
@@ -489,6 +518,209 @@ jobs:
               failed=1
             fi
           done
+          exit "$failed"
+
+  # The repository-metadata job decides, once, whether a change
+  # touched dependency files, and the Grype job reads its verdict. The
+  # live legs see one verdict per event, so assert the wiring each
+  # needs: every lane pins repository-metadata-action v0.4.0, the
+  # first release with detection; the verify lane turns detection on
+  # under grype_gate_when 'dependencies-changed', hands it the Gerrit
+  # change and the narrowing inputs, and exposes the verdict; the grype
+  # job waits for it, keeps running when it fails, and reads it only
+  # from a job that succeeded. No lane may keep the SBOM job's old
+  # sidecar, and each passes the bypass repository through.
+  dependency-change-wiring:
+    name: 'Dependency Change Wiring'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    timeout-minutes: 5
+    steps:
+      - name: 'Harden runner'
+        # yamllint disable-line rule:line-length
+        uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43  # v2.22.3
+        with:
+          egress-policy: 'audit'
+
+      - name: 'Checkout repository'
+        # yamllint disable-line rule:line-length
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: 'The lanes wire dependency-change detection to Grype'
+        shell: bash
+        env:
+          PIN: '18e5b7c5b16423b0e734891d103513826b324858'
+        run: |
+          # The lanes wire dependency-change detection to Grype
+          set -euo pipefail
+          failed=0
+          pass() { echo "✅ $1"; }
+          miss() { echo "::error::$1"; failed=1; }
+          # Split so the runner does not evaluate the expressions.
+          ghexpr() { printf '%s{{ %s }}' '$' "$1"; }
+          # expect <file> <yq path> <want> <label>
+          expect() {
+            local got
+            got="$(yq "$2" "$1" 2>&1)" || true
+            if [ "$got" = "$3" ]; then
+              pass "$4"
+            else
+              miss "$4: '$got' in $1"
+            fi
+          }
+          action='lfreleng-actions/repository-metadata-action'
+          verify='.github/workflows/build-test.yaml'
+          for file in "$verify" .github/workflows/build-test-release.yaml \
+            .github/workflows/merge.yaml; do
+            refs="$(yq "[.jobs[].steps[]?.uses // \"\"
+              | select(test(\"^$action@\"))] | length" "$file")"
+            stale="$(yq "[.jobs[].steps[]?.uses // \"\"
+              | select(test(\"^$action@\") and . != \"$action@$PIN\")]
+              | length" "$file")"
+            if [ "$refs" -ge 1 ] && [ "$stale" -eq 0 ]; then
+              pass "$file pins $action at v0.4.0"
+            else
+              miss "$file has $refs $action steps, $stale off v0.4.0"
+            fi
+            sidecar='dependency-change-(action|manifest)|dependency-change\.json'
+            if grep -nE "$sidecar" "$file"; then
+              miss "$file still refers to the SBOM job's sidecar"
+            else
+              pass "$file carries no dependency-change sidecar"
+            fi
+            input='.on.workflow_call.inputs.grype_bypass_repository'
+            expect "$file" "$input.type + \"=\" + $input.default" 'string=' \
+              "$file declares grype_bypass_repository, default ''"
+            expect "$file" \
+              '.jobs.grype.steps[] | select(.id == "grype-audit")
+                | .with."bypass-repository"' \
+              "$(ghexpr 'inputs.grype_bypass_repository')" \
+              "$file passes grype_bypass_repository to Grype"
+          done
+
+          for name in ecosystems patterns; do
+            input=".on.workflow_call.inputs.grype_dependency_$name"
+            expect "$verify" "$input.type + \"=\" + $input.default" \
+              'string=' "The verify lane declares grype_dependency_$name"
+          done
+          step='.jobs.repository-metadata.steps[]
+            | select(.id == "repo-metadata") | .with'
+          gate="inputs.grype_enabled"
+          gate="$gate && inputs.grype_gate_when == 'dependencies-changed'"
+          expect "$verify" "$step | .dependency_change" "$(ghexpr "$gate")" \
+            'Detection runs when Grype gates on dependency changes'
+          expect "$verify" "$step | .gerrit_refspec" \
+            "$(ghexpr 'inputs.gerrit_refspec')" \
+            'Detection compares a Gerrit change with its parent'
+          for name in ecosystems patterns; do
+            expect "$verify" "$step | .dependency_$name" \
+              "$(ghexpr "inputs.grype_dependency_$name")" \
+              "Detection takes grype_dependency_$name"
+          done
+          expect "$verify" "$step | .dependency_path_prefix" '.' \
+            'Detection covers the whole repository'
+          expect "$verify" \
+            '.jobs.repository-metadata.outputs.dependencies_changed' \
+            "$(ghexpr 'steps.repo-metadata.outputs.dependencies_changed')" \
+            'The repository-metadata job exposes the verdict'
+          needs='[.jobs.grype.needs] | flatten'
+          expect "$verify" "$needs | any_c(. == \"repository-metadata\")" \
+            'true' 'The grype job waits for the verdict'
+          expect "$verify" '.jobs.grype.if | contains("!cancelled()")' \
+            'true' 'The grype job runs when repository-metadata fails'
+          verdict="needs.repository-metadata.result == 'success'"
+          verdict="$verdict && needs.repository-metadata.outputs"
+          verdict="$verdict.dependencies_changed || ''"
+          expect "$verify" \
+            '.jobs.grype.steps[] | select(.id == "grype-audit")
+              | .with."dependencies-changed"' \
+            "$(ghexpr "$verdict")" \
+            'Grype reads the verdict from a successful job alone'
+          exit "$failed"
+
+  # The lanes check the Grype dependency inputs before any job runs.
+  # Run each lane's check outside the lane, so every refusal is
+  # exercised without a red lane run: the script is the one the lanes
+  # run, not a copy that could drift.
+  grype-input-cases:
+    name: 'Grype Input Checks'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    timeout-minutes: 5
+    steps:
+      - name: 'Harden runner'
+        # yamllint disable-line rule:line-length
+        uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43  # v2.22.3
+        with:
+          egress-policy: 'audit'
+
+      - name: 'Checkout repository'
+        # yamllint disable-line rule:line-length
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: 'Run the cases'
+        shell: bash
+        env:
+          SCRIPTS: ${{ runner.temp }}/grype-inputs
+        run: |
+          # Run the cases
+          set -euo pipefail
+          failed=0
+          pass() { echo "✅ $1"; }
+          miss() { echo "::error::$1"; failed=1; }
+          mkdir -p "$SCRIPTS"
+          # check <script> <want: pass|fail> <ecosystems> <bypass>
+          check() {
+            local rc=0 log
+            log="$(env -i PATH="$PATH" ECOSYSTEMS="$3" \
+              BYPASS_REPOSITORY="$4" bash "$1" 2>&1)" || rc=$?
+            if { [ "$2" = 'pass' ] && [ "$rc" -eq 0 ]; } \
+              || { [ "$2" = 'fail' ] && [ "$rc" -ne 0 ] \
+                && [[ "$log" == *'::error::grype_'* ]]; }; then
+              pass "$(basename "$1"): $2s ${3@Q} ${4@Q}"
+            else
+              miss "$(basename "$1"): ${3@Q} ${4@Q} gave exit $rc: $log"
+            fi
+          }
+          for lane in build-test build-test-release merge; do
+            script="$SCRIPTS/$lane.sh"
+            yq '.jobs.gerrit-validate.steps[]
+              | select(.id == "grype-inputs") | .run' \
+              ".github/workflows/$lane.yaml" > "$script"
+            if ! grep -q '^set -euo pipefail$' "$script"; then
+              miss "$lane.yaml has no Grype input check"
+              continue
+            fi
+            check "$script" pass '' ''
+            check "$script" pass '' 'lfreleng-actions/.github'
+            check "$script" pass '' 'owner_1/name-2.x'
+            check "$script" fail '' 'owner'
+            check "$script" fail '' 'owner/name/extra'
+            check "$script" fail '' '/name'
+            check "$script" fail '' 'owner/'
+            check "$script" fail '' 'owner/na me'
+            check "$script" fail '' $'owner/name\nother/name'
+          done
+          # The ecosystem input exists on the verify lane alone.
+          script="$SCRIPTS/build-test.sh"
+          check "$script" pass 'rust' ''
+          check "$script" pass ' rust , docker ' ''
+          check "$script" pass 'node,python,go,maven,gradle,rust,docker' ''
+          check "$script" fail 'cargo' ''
+          check "$script" fail 'Rust' ''
+          check "$script" fail 'rust,cargo' ''
+          check "$script" fail 'rust,' ''
+          check "$script" fail ',rust' ''
+          check "$script" fail 'rust,,go' ''
+          check "$script" fail ' ' ''
+          check "$script" fail 'rust go' ''
+          check "$script" fail $'rust\ngo' ''
           exit "$failed"
 
   # Every harden-runner-block-action step in the five reusable
@@ -1469,7 +1701,8 @@ jobs:
     needs:
       - verify
       - verify-release-file
-      - verify-grype-window
+      - verify-grype-unresolved
+      - verify-dependency-change
       - release-dry-run
       - merge-dry-run
       - merge-release-dry-run
@@ -1478,7 +1711,8 @@ jobs:
     if: >-
       ${{ !cancelled() && needs.verify.result == 'success'
       && needs.verify-release-file.result == 'success'
-      && needs.verify-grype-window.result == 'success'
+      && needs.verify-grype-unresolved.result == 'success'
+      && needs.verify-dependency-change.result == 'success'
       && contains(fromJSON('["success", "skipped"]'), needs.release-dry-run.result)
       && contains(fromJSON('["success", "skipped"]'), needs.merge-dry-run.result)
       && contains(fromJSON('["success", "skipped"]'), needs.merge-release-dry-run.result) }}
@@ -1507,9 +1741,14 @@ jobs:
           VERIFY_HAS_RELEASE: ${{ needs.verify-release-file.outputs.has_release }}
           VERIFY_VERSION: ${{ needs.verify-release-file.outputs.version }}
           # yamllint disable-line rule:line-length
-          WINDOW_GATE_ACTIVE: ${{ needs.verify-grype-window.outputs.grype_gate_active }}
+          UNRESOLVED_GATE_ACTIVE: ${{ needs.verify-grype-unresolved.outputs.grype_gate_active }}
           # yamllint disable-line rule:line-length
-          WINDOW_GATE_REASON: ${{ needs.verify-grype-window.outputs.grype_gate_reason }}
+          UNRESOLVED_GATE_REASON: ${{ needs.verify-grype-unresolved.outputs.grype_gate_reason }}
+          # yamllint disable-line rule:line-length
+          CHANGE_GATE_ACTIVE: ${{ needs.verify-dependency-change.outputs.grype_gate_active }}
+          # yamllint disable-line rule:line-length
+          CHANGE_GATE_REASON: ${{ needs.verify-dependency-change.outputs.grype_gate_reason }}
+          EVENT_NAME: ${{ github.event_name }}
           RELEASE_RAN: ${{ needs.release-dry-run.result == 'success' }}
           MERGE_RAN: ${{ needs.merge-dry-run.result == 'success' }}
           MERGE_HAS_RELEASE: ${{ needs.merge-dry-run.outputs.has_release }}
@@ -1563,10 +1802,11 @@ jobs:
           else
             miss 'The workspace-member SBOM misses a workspace member'
           fi
-          if [ -f "$DIR/sbom-files-root/dependency-change.json" ]; then
-            pass 'The SBOM job recorded whether dependencies changed'
+          # The repository-metadata job decides the verdict now.
+          if [ ! -e "$DIR/sbom-files-root/dependency-change.json" ]; then
+            pass 'The SBOM job wrote no dependency change sidecar'
           else
-            miss 'The SBOM job recorded no dependency change sidecar'
+            miss 'The SBOM job still wrote a dependency change sidecar'
           fi
           if [ -f "$DIR/rust-build-x64-root/SHA256SUMS" ] \
             && [ -f "$DIR/rust-build-arm64-root/SHA256SUMS" ]; then
@@ -1586,15 +1826,38 @@ jobs:
             got="'$VERIFY_HAS_RELEASE', '$VERIFY_VERSION'"
             miss "The verify lane reported has_release, version: $got"
           fi
-          # An unarmed gate arms only through the window, and reports it.
+          # An unresolved verdict gates outright, with no window clause.
+          unavailable='the dependency-change signal was unavailable'
+          if [ "$UNRESOLVED_GATE_ACTIVE" = 'true' ] \
+            && [ "$UNRESOLVED_GATE_REASON" = "$unavailable" ]; then
+            pass 'An unresolved dependency-change verdict armed the gate'
+          else
+            got="'$UNRESOLVED_GATE_ACTIVE', '$UNRESOLVED_GATE_REASON'"
+            miss "The Grype unresolved leg reported gate-active, reason: $got"
+          fi
+          # On a pull request the verdict resolves: a touched dependency
+          # file arms the gate, and otherwise the window alone arms it,
+          # and reports it. A dispatch has no change to compare.
+          touched='this change touched the dependency chain'
+          untouched='this change did not touch the dependency chain'
           window='a finding gates once its fix has been available'
           window="$window for 7 day(s)"
-          if [ "$WINDOW_GATE_ACTIVE" = 'true' ] \
-            && [[ "$WINDOW_GATE_REASON" == *"; $window" ]]; then
-            pass 'The verify lane passed the remediation window to Grype'
+          got="'$CHANGE_GATE_ACTIVE', '$CHANGE_GATE_REASON'"
+          if [ "$EVENT_NAME" != 'pull_request' ]; then
+            if [ "$CHANGE_GATE_ACTIVE" = 'true' ] \
+              && [ "$CHANGE_GATE_REASON" = "$unavailable" ]; then
+              pass "A $EVENT_NAME run left the verdict unresolved"
+            else
+              miss "The dependency-change leg reported gate, reason: $got"
+            fi
+          elif [ "$CHANGE_GATE_ACTIVE" = 'true' ] \
+            && [ "$CHANGE_GATE_REASON" = "$touched" ]; then
+            pass 'The verdict resolved: this change touched dependencies'
+          elif [ "$CHANGE_GATE_ACTIVE" = 'true' ] \
+            && [ "$CHANGE_GATE_REASON" = "$untouched; $window" ]; then
+            pass 'The verdict resolved, and the window armed the gate'
           else
-            got="'$WINDOW_GATE_ACTIVE', '$WINDOW_GATE_REASON'"
-            miss "The Grype window leg reported gate-active, reason: $got"
+            miss "The dependency-change leg reported gate, reason: $got"
           fi
           if [ "$RELEASE_RAN" != 'true' ]; then
             echo "::notice::The release dry run skipped on this event"
