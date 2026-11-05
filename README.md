@@ -208,6 +208,13 @@ approve a bypass for a single CVE through a `cve-bypass` issue, which
 the action honours. Set `grype_bypass_repository` to read those issues
 from one shared repository instead of the calling one.
 
+Each lane's `gerrit-validate` job checks the `grype_*` inputs before
+anything builds, by running grype-scan-action in its validation mode
+with the same inputs the scan gets: the action checks them and stops,
+installing no Grype and scanning nothing, so a typo fails in seconds
+under the action's own rules. `grype_dependency_ecosystems` belongs
+to repository-metadata-action and keeps a shell check there.
+
 ## Runner hardening
 
 Every job hardens its runner with `harden-runner`, by default in

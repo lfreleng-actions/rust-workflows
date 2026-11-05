@@ -495,10 +495,14 @@ jobs:
     # Fails fast on inputs the jobs would otherwise reject one by one.
     # This job always runs (only its steps are conditional), so gating
     # dependents on it does not trip GitHub's "skipped need skips
-    # dependents" behaviour.
+    # dependents" behaviour. The job checks out nothing and runs no
+    # harden-runner by design: its one action, grype-scan-action in
+    # validate-only mode, is fetched by GitHub with the workflow, and
+    # that it makes no network request of its own is the action's
+    # contract, tested in its own repository rather than proven here.
     runs-on: ubuntu-latest
     permissions: {}
-    timeout-minutes: 2
+    timeout-minutes: 5
     steps:
       - name: 'Require Gerrit project, branch and URL'
         if: inputs.gerrit_refspec != ''
@@ -549,9 +553,6 @@ jobs:
           TEST_RUNNER: ${{ inputs.test_runner }}
           ARTEFACT_SUFFIX: ${{ inputs.artefact_suffix }}
           SBOM_FORMAT: ${{ inputs.sbom_format }}
-          GRYPE_FAIL_ON: ${{ inputs.grype_fail_on }}
-          GRYPE_DEPENDENCY_POLICY: ${{ inputs.grype_dependency_policy }}
-          GRYPE_TRANSITIVE_FAIL_ON: ${{ inputs.grype_transitive_fail_on }}
           VERSION_SOURCE: ${{ inputs.version_source }}
           DRY_RUN: ${{ inputs.dry_run }}
           TAG: ${{ inputs.tag }}
@@ -573,12 +574,6 @@ jobs:
           }
           check test_runner "$TEST_RUNNER" 'cargo nextest'
           check sbom_format "$SBOM_FORMAT" 'json xml both'
-          check grype_fail_on "$GRYPE_FAIL_ON" \
-            'negligible low medium high critical none'
-          check grype_dependency_policy "$GRYPE_DEPENDENCY_POLICY" \
-            'all declared'
-          check grype_transitive_fail_on "$GRYPE_TRANSITIVE_FAIL_ON" \
-            'negligible low medium high critical none'
           check version_source "$VERSION_SOURCE" 'manifest tag'
           if [ "$DRY_RUN" = 'true' ]; then
             [ -n "$TAG" ] || error "dry_run needs the tag input"
@@ -603,24 +598,29 @@ jobs:
           fi
           exit "$failed"
 
-      # The value is not echoed back: a line break in it could forge a
-      # workflow command.
-      - name: 'Check the Grype dependency inputs'
-        id: grype-inputs
-        shell: bash
-        env:
-          BYPASS_REPOSITORY: ${{ inputs.grype_bypass_repository }}
-        run: |
-          # Check the Grype dependency inputs
-          set -euo pipefail
-          failed=0
-          owner_name='^([A-Za-z0-9._-]+/[A-Za-z0-9._-]+)?$'
-          if ! [[ "$BYPASS_REPOSITORY" =~ $owner_name ]]; then
-            echo "::error::grype_bypass_repository: expected '' or" \
-              "owner/name of A-Z a-z 0-9 . _ -"
-            failed=1
-          fi
-          exit "$failed"
+      # grype-scan-action checks these inputs itself, but only once the
+      # build has run. Its validate-only mode runs the same checks on
+      # the same code and nothing else: no Grype install, no database,
+      # no scan, no bypass issue, no network request, so a typo fails
+      # here in seconds and the rules cannot drift from the action's
+      # own. The with: block mirrors the scan step's: every input the
+      # scan passes as one grype_* input of this lane, or as a fixed
+      # value, with the identical expression, and no sbom or target,
+      # which this mode needs neither of and rejects. Inputs the scan
+      # takes from this run rather than from the caller (permit-fail,
+      # github-token, artifact-name) carry no policy and stay with the
+      # scan. tests/test-grype-validate-inputs.sh holds the two in step.
+      - name: 'Validate Grype inputs'
+        # yamllint disable-line rule:line-length
+        uses: lfreleng-actions/grype-scan-action@f65dca2762823cfc8f376e32fee9baa6f3292696  # v0.6.2
+        with:
+          validate-only: 'true'
+          fail-on: ${{ inputs.grype_fail_on }}
+          dependency-policy: ${{ inputs.grype_dependency_policy }}
+          transitive-fail-on: ${{ inputs.grype_transitive_fail_on }}
+          only-fixed: ${{ inputs.grype_only_fixed }}
+          cache-db: 'restore-only'
+          bypass-repository: ${{ inputs.grype_bypass_repository }}
 
   repository-metadata:
     name: 'Repository Metadata'
@@ -1275,7 +1275,7 @@ jobs:
       - name: 'Grype audit SBOM'
         id: grype-audit
         # yamllint disable-line rule:line-length
-        uses: lfreleng-actions/grype-scan-action@5c81b23afb2ea771b2d247807a12d90783328675  # v0.5.0
+        uses: lfreleng-actions/grype-scan-action@f65dca2762823cfc8f376e32fee9baa6f3292696  # v0.6.2
         with:
           # The JSON document, or the XML one when that is all there is.
           # yamllint disable-line rule:line-length

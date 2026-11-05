@@ -344,7 +344,7 @@ jobs:
   # The release file is the workspace variant's, so the call selects
   # that variant, as verify-release-file does, and the release-file
   # check passes. Nothing the action reports depends on the window's
-  # start date, so grype-window-wiring checks that input's
+  # start date, so grype-validate-wiring checks that input's
   # pass-through instead.
   verify-grype-unresolved:
     name: 'Verify (Grype unresolved)'
@@ -465,15 +465,22 @@ jobs:
         static.crates.io:443
       artefact_suffix: '-extra-endpoints'
 
-  # The verify lane hands both window inputs to the Grype action. The
-  # dependency-change leg above proves the days arrive, through the
-  # gate the action reports, on a change that leaves the gate unarmed;
-  # no output reflects the start date unless a finding with a known fix
-  # date turns up, which the fixture cannot promise.
-  # Dropping that mapping would lose adopters their backlog's grace
-  # period with every run still green, so assert the wiring itself.
-  grype-window-wiring:
-    name: 'Grype Window Wiring'
+  # Each lane's gerrit-validate job validates the grype_* inputs by
+  # running grype-scan-action in validate-only mode, with the scan
+  # step's own with: block less sbom. The rules are then the action's
+  # own, tested in its repository, so nothing here re-tests them value
+  # by value; what can drift is the wiring. The script checks, in all
+  # three lanes, that the validator and the scan share one pin with its
+  # version comment, that the validator passes validate-only 'true'
+  # and the identical expression for every input the scan passes as a
+  # lane input or a fixed value (read from the scan step, so an input
+  # added there alone fails), that it passes no sbom or target, that
+  # no shell check of an action-owned input remains, and that every
+  # job waits on gerrit-validate. It then mutates a copy of the verify
+  # lane in each way it must catch and expects each mutant to fail.
+  # The pre-commit hook of the same name runs it on every change too.
+  grype-validate-wiring:
+    name: 'Grype Validation Wiring'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -491,34 +498,74 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: 'The verify lane passes both window inputs to Grype'
+      - name: 'Install uv'
+        # yamllint disable-line rule:line-length
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9  # v9.0.0
+
+      - name: 'The validators mirror the scans through the action'
         shell: bash
         run: |
-          # The verify lane passes both window inputs to Grype
+          # The validators mirror the scans through the action
           set -euo pipefail
-          failed=0
-          file='.github/workflows/build-test.yaml'
-          step='.jobs.grype.steps[] | select(.id == "grype-audit") | .with'
-          for name in days start; do
-            input="grype_remediation_window_$name"
-            key="remediation-window-$name"
-            # Split so the runner does not evaluate the expression.
-            want='$'"{{ inputs.$input }}"
-            got="$(yq "$step | .\"$key\"" "$file")"
-            if [ "$got" = "$want" ]; then
-              echo "✅ $key takes $input"
-            else
-              echo "::error::$key in the grype job is '$got'," \
-                "not the $input input"
-              failed=1
-            fi
-            if [ "$(yq ".on.workflow_call.inputs | has(\"$input\")" \
-              "$file")" != 'true' ]; then
-              echo "::error::The verify lane declares no $input input"
-              failed=1
-            fi
-          done
-          exit "$failed"
+          # uv puts PyYAML in the run's own environment, whose python3
+          # the script's isolated interpreter (-I) still sees; the user
+          # site, which -I excludes, plays no part.
+          uv run --no-project --with 'pyyaml==6.0.2' \
+            bash tests/test-grype-validate-inputs.sh
+
+  # Proves the lanes' gerrit-validate job rejects a bad policy value in
+  # seconds: the validator step, at the lanes' pin with the verify
+  # lane's defaults and a gate-when the action does not know, must
+  # fail. A job calling a lane cannot set continue-on-error, so this
+  # runs the action itself with the verify lane's with: block as fixed
+  # values, which grype-validate-wiring holds in step with the lane's.
+  # Like the lanes' job it runs that one action, with no checkout and
+  # no harden-runner: that validate-only makes no network request is
+  # grype-scan-action's contract, tested in its own repository, so this
+  # job asserts the verdict alone and proves nothing about the network.
+  grype-validate-check:
+    name: 'Grype Validate Check'
+    runs-on: ubuntu-latest
+    permissions: {}
+    timeout-minutes: 5
+    steps:
+      - name: 'Validate Grype inputs'
+        id: validate
+        continue-on-error: true
+        # yamllint disable-line rule:line-length
+        uses: lfreleng-actions/grype-scan-action@f65dca2762823cfc8f376e32fee9baa6f3292696  # v0.6.2
+        with:
+          validate-only: 'true'
+          fail-on: 'medium'
+          dependency-policy: 'declared'
+          transitive-fail-on: 'critical'
+          only-fixed: 'true'
+          gate-when: 'never'
+          remediation-window-days: '14'
+          remediation-window-start: ''
+          cache-db: 'true'
+          bypass-repository: ''
+
+      - name: 'Assert the step rejected the gate-when'
+        shell: bash
+        env:
+          OUTCOME: ${{ steps.validate.outcome }}
+          VALIDATED: ${{ steps.validate.outputs.validated }}
+        run: |
+          # Assert the step rejected the gate-when
+          set -euo pipefail
+          echo "outcome: ${OUTCOME}"
+          echo "validated: ${VALIDATED}"
+          if [ "${OUTCOME}" != "failure" ]; then
+            echo "::error::validate-only ended '${OUTCOME}' on a" \
+              "gate-when the action does not know; expected failure"
+            exit 1
+          fi
+          if [ -n "${VALIDATED}" ]; then
+            echo "::error::validated is '${VALIDATED}' after a rejection"
+            exit 1
+          fi
+          echo "Grype validate-only rejection checked ✅"
 
   # The repository-metadata job decides, once, whether a change
   # touched dependency files, and the Grype job reads its verdict. The
@@ -641,10 +688,12 @@ jobs:
             'Grype reads the verdict from a successful job alone'
           exit "$failed"
 
-  # The lanes check the Grype dependency inputs before any job runs.
-  # Run each lane's check outside the lane, so every refusal is
-  # exercised without a red lane run: the script is the one the lanes
-  # run, not a copy that could drift.
+  # The verify lane checks grype_dependency_ecosystems before any job
+  # runs: an input of repository-metadata-action, not of
+  # grype-scan-action, so the validate-only step cannot check it. Run
+  # the check outside the lane, so every refusal is exercised without
+  # a red lane run: the script is the one the lane runs, not a copy
+  # that could drift.
   grype-input-cases:
     name: 'Grype Input Checks'
     runs-on: ubuntu-latest
@@ -667,60 +716,46 @@ jobs:
       - name: 'Run the cases'
         shell: bash
         env:
-          SCRIPTS: ${{ runner.temp }}/grype-inputs
+          SCRIPT: ${{ runner.temp }}/grype-inputs.sh
         run: |
           # Run the cases
           set -euo pipefail
           failed=0
           pass() { echo "✅ $1"; }
           miss() { echo "::error::$1"; failed=1; }
-          mkdir -p "$SCRIPTS"
-          # check <script> <want: pass|fail> <ecosystems> <bypass>
+          # check <want: pass|fail> <ecosystems>
           check() {
             local rc=0 log
-            log="$(env -i PATH="$PATH" ECOSYSTEMS="$3" \
-              BYPASS_REPOSITORY="$4" bash "$1" 2>&1)" || rc=$?
-            if { [ "$2" = 'pass' ] && [ "$rc" -eq 0 ]; } \
-              || { [ "$2" = 'fail' ] && [ "$rc" -ne 0 ] \
+            log="$(env -i PATH="$PATH" ECOSYSTEMS="$2" \
+              bash "$SCRIPT" 2>&1)" || rc=$?
+            if { [ "$1" = 'pass' ] && [ "$rc" -eq 0 ]; } \
+              || { [ "$1" = 'fail' ] && [ "$rc" -ne 0 ] \
                 && [[ "$log" == *'::error::grype_'* ]]; }; then
-              pass "$(basename "$1"): $2s ${3@Q} ${4@Q}"
+              pass "ecosystems ${2@Q}: $1"
             else
-              miss "$(basename "$1"): ${3@Q} ${4@Q} gave exit $rc: $log"
+              miss "ecosystems ${2@Q} gave exit $rc: $log"
             fi
           }
-          for lane in build-test build-test-release merge; do
-            script="$SCRIPTS/$lane.sh"
-            yq '.jobs.gerrit-validate.steps[]
-              | select(.id == "grype-inputs") | .run' \
-              ".github/workflows/$lane.yaml" > "$script"
-            if ! grep -q '^set -euo pipefail$' "$script"; then
-              miss "$lane.yaml has no Grype input check"
-              continue
-            fi
-            check "$script" pass '' ''
-            check "$script" pass '' 'lfreleng-actions/.github'
-            check "$script" pass '' 'owner_1/name-2.x'
-            check "$script" fail '' 'owner'
-            check "$script" fail '' 'owner/name/extra'
-            check "$script" fail '' '/name'
-            check "$script" fail '' 'owner/'
-            check "$script" fail '' 'owner/na me'
-            check "$script" fail '' $'owner/name\nother/name'
-          done
-          # The ecosystem input exists on the verify lane alone.
-          script="$SCRIPTS/build-test.sh"
-          check "$script" pass 'rust' ''
-          check "$script" pass ' rust , docker ' ''
-          check "$script" pass 'node,python,go,maven,gradle,rust,docker' ''
-          check "$script" fail 'cargo' ''
-          check "$script" fail 'Rust' ''
-          check "$script" fail 'rust,cargo' ''
-          check "$script" fail 'rust,' ''
-          check "$script" fail ',rust' ''
-          check "$script" fail 'rust,,go' ''
-          check "$script" fail ' ' ''
-          check "$script" fail 'rust go' ''
-          check "$script" fail $'rust\ngo' ''
+          yq '.jobs.gerrit-validate.steps[]
+            | select(.id == "grype-inputs") | .run' \
+            .github/workflows/build-test.yaml > "$SCRIPT"
+          if ! grep -q '^set -euo pipefail$' "$SCRIPT"; then
+            echo "::error::build-test.yaml has no Grype input check"
+            exit 1
+          fi
+          check pass ''
+          check pass 'rust'
+          check pass ' rust , docker '
+          check pass 'node,python,go,maven,gradle,rust,docker'
+          check fail 'cargo'
+          check fail 'Rust'
+          check fail 'rust,cargo'
+          check fail 'rust,'
+          check fail ',rust'
+          check fail 'rust,,go'
+          check fail ' '
+          check fail 'rust go'
+          check fail $'rust\ngo'
           exit "$failed"
 
   # Every harden-runner-block-action step in the five reusable

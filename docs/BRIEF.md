@@ -45,7 +45,7 @@ State on 2026-10-17.
 | Test         | `rust-test-action`          | Released v0.0.1                                                                                                          |
 | Audit        | `rust-audit-action`         | Released v0.0.1                                                                                                          |
 | SBOM         | `sbom-action`               | Released v0.7.0: `cyclonedx` backend with a `cargo` dependency manager, feature selection, working directory and version |
-| Scan         | `grype-scan-action`         | Released v0.5.0: dependency policy, Cargo graph classification, remediation window                                       |
+| Scan         | `grype-scan-action`         | Released v0.6.2: dependency policy, Cargo graph classification, remediation window, input validation mode                |
 | CBOM         | `cbom-action`               | Released v0.0.1; no Rust coverage upstream (#10), so the lanes scan other languages alone                                |
 | Publish      | `rust-crate-publish-action` | Released v0.3.0: named registries, workspace sets, semver checks, `toolchain` and `version` inputs                       |
 | Test fixture | `test-rust-project`         | Crate `lfreleng-test-rust-project` 0.1.2 on crates.io, published through Trusted Publishing; variants                    |
@@ -775,8 +775,11 @@ The lanes expose the severity threshold, fixed-advisory filtering,
 window (v0.5.0, grype-scan-action #45 and #47) and `cache-db`. They
 also expose the provenance controls as `grype_dependency_policy` and
 `grype_transitive_fail_on`, and `bypass-repository` as
-`grype_bypass_repository`, which `gerrit-validate` checks is empty or
-`owner/name`. The verify lane feeds `dependencies-changed` from the
+`grype_bypass_repository`. Each lane's `gerrit-validate` job checks
+the `grype_*` inputs by running the action in its validation mode
+(v0.6.2) with the scan step's own inputs: the action's rules, not a
+shell copy of them, refuse a bad value before any job builds. The
+verify lane feeds `dependencies-changed` from the
 `repository-metadata` verdict (Q6), narrowed by
 `grype_dependency_ecosystems` and `grype_dependency_patterns`. The
 names follow the lanes' `grype_` convention.
@@ -845,12 +848,17 @@ changes once upstream support exists.
     dependency file or the 7-day window arming it, and on a manual
     dispatch reports the verdict unresolved. Since no output reflects
     `grype_remediation_window_start` without a finding of known fix
-    date, a static check covers that the Grype job passes both window
-    inputs to the action, another the dependency-change wiring in all
-    three lanes (the v0.4.0 pin, the detection inputs, the job output,
-    the grype job's `needs` and guarded verdict, no SBOM sidecar, the
-    bypass repository), and a third runs each lane's Grype input check
-    against accepted and refused values;
+    date, a contract check (`tests/test-grype-validate-inputs.sh`,
+    also a prek hook) covers that each lane's `gerrit-validate` runs
+    the action in its validation mode at the scan's pin with the
+    inputs the scan passes, and proves itself against mutated copies
+    of the lanes; a rejection check runs the action in that mode with
+    a bad value and expects the refusal; another static check covers
+    the dependency-change wiring in all three lanes (the v0.4.0 pin, the
+    detection inputs, the job output, the grype job's `needs` and
+    guarded verdict, no SBOM sidecar, the bypass repository); and a
+    fourth runs the verify lane's ecosystem input check against
+    accepted and refused values;
   - the verify lane's release-file check on the fixture's merge commit
     that adds `releases/workspace-0.1.0.yaml`, with the workspace
     variant selected and the other stages off, which reports release
