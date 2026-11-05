@@ -305,6 +305,14 @@ on:
         required: false
         type: boolean
         default: false
+      grype_bypass_repository:
+        description: >-
+          Repository holding the approved cve-bypass issues Grype
+          honours, as owner/name. Empty uses the calling repository;
+          set it to share one bypass list.
+        required: false
+        type: string
+        default: ''
 
       # --- Release ---
       semver_checks:
@@ -557,6 +565,25 @@ jobs:
           fi
           exit "$failed"
 
+      # The value is not echoed back: a line break in it could forge a
+      # workflow command.
+      - name: 'Check the Grype dependency inputs'
+        id: grype-inputs
+        shell: bash
+        env:
+          BYPASS_REPOSITORY: ${{ inputs.grype_bypass_repository }}
+        run: |
+          # Check the Grype dependency inputs
+          set -euo pipefail
+          failed=0
+          owner_name='^([A-Za-z0-9._-]+/[A-Za-z0-9._-]+)?$'
+          if ! [[ "$BYPASS_REPOSITORY" =~ $owner_name ]]; then
+            echo "::error::grype_bypass_repository: expected '' or" \
+              "owner/name of A-Z a-z 0-9 . _ -"
+            failed=1
+          fi
+          exit "$failed"
+
   # Resolve, once, the commit a Gerrit dispatch checks out, as
   # node-workflows does (its #119).
   #
@@ -761,7 +788,7 @@ jobs:
       - name: 'Gather repository metadata'
         id: repo-metadata
         # yamllint disable-line rule:line-length
-        uses: lfreleng-actions/repository-metadata-action@2206d754f65f1a90f57b49be546712c5f594def2  # v0.3.3
+        uses: lfreleng-actions/repository-metadata-action@18e5b7c5b16423b0e734891d103513826b324858  # v0.4.0
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           github_summary: 'true'
@@ -1357,6 +1384,7 @@ jobs:
           cache-db: 'restore-only'
           # yamllint disable-line rule:line-length
           permit-fail: ${{ inputs.grype_permit_fail || vars.NO_BLOCK_AUDIT_FAIL == 'true' }}
+          bypass-repository: ${{ inputs.grype_bypass_repository }}
           github-token: ${{ secrets.GITHUB_TOKEN }}
           artifact-name: grype-scan-results${{ inputs.artefact_suffix }}
 
