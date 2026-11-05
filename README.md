@@ -247,6 +247,18 @@ cross-organisation. Pull requests from forks run as the base
 repository, so this does not affect them. Projects whose contributors run the
 lanes in their own forks should pin.
 
+The five `harden_runner_*` inputs are the same in every `*-workflows`
+repository. `tests/test-harden-runner-inputs.sh`, a pre-commit hook,
+fails when a reusable workflow that uses the block-action drops one of
+them, changes its type or default, passes it in another form, or lets
+a block-action step carry on past a missing named list. Every
+block-action step must pin the same commit SHA, with a `# vX.Y.Z`
+comment naming the same release, at or above `v0.15.0`, the first with
+`extra_endpoints`. A newer release passes, so a Dependabot bump does
+not fail the check. Each input's description starts with the
+reference wording the script holds, and may add a note about the
+workflow after a full stop.
+
 ### Inline extra endpoints
 
 `harden_runner_extra_endpoints` is for emergencies: a job blocked by
