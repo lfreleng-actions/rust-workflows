@@ -5,11 +5,14 @@
 # Reusable Rust build/test pipeline: the verify lane.
 #
 # Runs on pull requests and Gerrit patch sets. The repository-metadata
-# job runs in parallel as an informational step. After the build, the
-# jobs in { } run in parallel; none gates another, so a change surfaces
-# every failure at once (-> denotes sequence):
+# job runs in parallel with the build: it reports on the change and
+# decides whether the change touched dependency files, the verdict the
+# grype job reads. After the build, the jobs in { } run in parallel;
+# none gates another, so a change surfaces every failure at once
+# (-> denotes sequence):
 #   rust-metadata -> { check-release | build }
 #   build -> { tests | audit | sbom -> grype | cbom }
+#   repository-metadata -> grype
 #
 # rust-metadata resolves one exact toolchain for the run, the test
 # matrix and the runners matrix (docs/BRIEF.md Q3, Q6, D4). build and
@@ -304,12 +307,40 @@ on:
       grype_gate_when:
         description: >-
           'always' gates on every scan. 'dependencies-changed' gates
-          only when the change touches Cargo.toml, Cargo.lock or Cargo
-          configuration, and otherwise reports findings as warnings,
-          subject to grype_remediation_window_days.
+          only when the change touches a dependency file, as the
+          repository-metadata job detects it, and otherwise reports
+          findings as warnings, subject to
+          grype_remediation_window_days. A run the detection cannot
+          resolve, or a failed or skipped repository-metadata job,
+          gates.
         required: false
         type: string
         default: 'dependencies-changed'
+      grype_dependency_ecosystems:
+        description: >-
+          Comma-separated dependency-change presets that count as
+          dependency files under grype_gate_when 'dependencies-changed':
+          node, python, go, maven, gradle, rust or docker. Empty means
+          every preset.
+        required: false
+        type: string
+        default: ''
+      grype_dependency_patterns:
+        description: >-
+          Extra dependency file patterns, one per line, added to the
+          presets. The detector's pattern grammar applies, and a pattern
+          it rejects fails the repository-metadata job.
+        required: false
+        type: string
+        default: ''
+      grype_bypass_repository:
+        description: >-
+          Repository holding the approved cve-bypass issues Grype
+          honours, as owner/name. Empty uses the calling repository;
+          set it to share one bypass list.
+        required: false
+        type: string
+        default: ''
       grype_remediation_window_days:
         description: >-
           Under grype_gate_when 'dependencies-changed', days a finding in
@@ -574,6 +605,44 @@ jobs:
           fi
           exit "$failed"
 
+      # Neither value is echoed back: a line break in one could forge a
+      # workflow command.
+      - name: 'Check the Grype dependency inputs'
+        id: grype-inputs
+        shell: bash
+        env:
+          ECOSYSTEMS: ${{ inputs.grype_dependency_ecosystems }}
+          BYPASS_REPOSITORY: ${{ inputs.grype_bypass_repository }}
+        run: |
+          # Check the Grype dependency inputs
+          set -euo pipefail
+          failed=0
+          if [ -n "$ECOSYSTEMS" ]; then
+            rest="$ECOSYSTEMS,"
+            while [ -n "$rest" ]; do
+              name="${rest%%,*}"
+              rest="${rest#*,}"
+              name="${name#"${name%%[![:space:]]*}"}"
+              name="${name%"${name##*[![:space:]]}"}"
+              case "$name" in
+                node | python | go | maven | gradle | rust | docker) ;;
+                *)
+                  echo "::error::grype_dependency_ecosystems: expected ''" \
+                    "or comma-separated names from: node python go" \
+                    "maven gradle rust docker"
+                  failed=1
+                  break ;;
+              esac
+            done
+          fi
+          owner_name='^([A-Za-z0-9._-]+/[A-Za-z0-9._-]+)?$'
+          if ! [[ "$BYPASS_REPOSITORY" =~ $owner_name ]]; then
+            echo "::error::grype_bypass_repository: expected '' or" \
+              "owner/name of A-Z a-z 0-9 . _ -"
+            failed=1
+          fi
+          exit "$failed"
+
   repository-metadata:
     name: 'Repository Metadata'
     needs: gerrit-validate
@@ -582,6 +651,10 @@ jobs:
       contents: read
       pull-requests: read  # repository-metadata-action queries PR data
     timeout-minutes: 5
+    outputs:
+      # 'true' or 'false' when detection resolved, otherwise empty
+      # yamllint disable-line rule:line-length
+      dependencies_changed: ${{ steps.repo-metadata.outputs.dependencies_changed }}
     steps:
       - name: 'Load egress allow-list'
         # yamllint disable-line rule:line-length
@@ -629,16 +702,27 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
+      # Detection runs here, once, rather than in each Grype job: this
+      # job holds the full history, or the Gerrit change with its
+      # parent, and runs no project code. It covers the whole
+      # repository, as a change to a workspace root or a shared Cargo
+      # configuration moves every project in it.
       - name: 'Gather repository metadata'
         id: repo-metadata
         # yamllint disable-line rule:line-length
-        uses: lfreleng-actions/repository-metadata-action@2206d754f65f1a90f57b49be546712c5f594def2  # v0.3.3
+        uses: lfreleng-actions/repository-metadata-action@18e5b7c5b16423b0e734891d103513826b324858  # v0.4.0
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           github_summary: 'true'
           gerrit_summary: ${{ inputs.gerrit_refspec != '' }}
           artifact_upload: 'true'
           artifact_formats: 'json'
+          # yamllint disable-line rule:line-length
+          dependency_change: ${{ inputs.grype_enabled && inputs.grype_gate_when == 'dependencies-changed' }}
+          gerrit_refspec: ${{ inputs.gerrit_refspec }}
+          dependency_ecosystems: ${{ inputs.grype_dependency_ecosystems }}
+          dependency_patterns: ${{ inputs.grype_dependency_patterns }}
+          dependency_path_prefix: '.'
 
   rust-metadata:
     name: 'Rust Metadata'
@@ -1165,8 +1249,6 @@ jobs:
           allowed-endpoints: >
             ${{ env.CONNECTION_ALLOW_LIST }}
 
-      # Depth 2 on both paths: the dependency-change check compares the
-      # commit under test with its first parent.
       - name: 'Checkout Gerrit change'
         if: inputs.gerrit_refspec != ''
         # yamllint disable-line rule:line-length
@@ -1178,7 +1260,6 @@ jobs:
           # yamllint disable-line rule:line-length
           gerrit-url: ${{ inputs.gerrit_url != '' && inputs.gerrit_url || vars.GERRIT_URL }}
           delay: '0s'
-          fetch-depth: '2'
           repository: ${{ inputs.repository || github.repository }}
           ref: refs/heads/${{ inputs.gerrit_branch }}
       - name: 'Checkout repository'
@@ -1189,7 +1270,6 @@ jobs:
           repository: ${{ inputs.repository || github.repository }}
           # yamllint disable-line rule:line-length
           ref: ${{ startsWith(needs.rust-metadata.outputs.ref, 'refs/tags/') && needs.rust-metadata.outputs.ref || needs.rust-metadata.outputs.sha }}
-          fetch-depth: 2
           persist-credentials: false
 
       - name: 'Pin the commit rust-metadata read'
@@ -1323,36 +1403,6 @@ jobs:
           output_directory: ${{ runner.temp }}/sbom
           untrusted_checkout: 'false'
 
-      # grype-scan-action's 'dependencies-changed' gate reads this
-      # sidecar. A missing parent leaves it unwritten, and the action
-      # then gates: an unknown answer must not wave findings through.
-      - name: 'Record whether dependencies changed'
-        shell: bash
-        env:
-          SBOM_DIR: ${{ runner.temp }}/sbom
-        run: |
-          # Record whether dependencies changed
-          set -euo pipefail
-          if ! git rev-parse --verify --quiet 'HEAD^1' > /dev/null; then
-            echo "::notice::No parent commit; dependency change unknown"
-            exit 0
-          fi
-          changed=false
-          # NUL-delimited: git quotes a path holding a space, a quote or
-          # a non-ASCII byte, which would never match below. No rename
-          # detection, so a manifest moved away counts at its old path.
-          while IFS= read -r -d '' file; do
-            case "$file" in
-              Cargo.toml | */Cargo.toml | Cargo.lock | */Cargo.lock \
-                | .cargo/config | .cargo/config.toml \
-                | */.cargo/config | */.cargo/config.toml)
-                changed=true ;;
-            esac
-          done < <(git diff -z --no-renames --name-only 'HEAD^1' HEAD)
-          printf '{"changed": %s}\n' "$changed" \
-            > "$SBOM_DIR/dependency-change.json"
-          echo "Dependencies changed: $changed"
-
       - name: 'Upload SBOM artefacts'
         # yamllint disable-line rule:line-length
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
@@ -1366,7 +1416,12 @@ jobs:
 
   grype:
     name: 'Grype Audit SBOM'
-    needs: sbom
+    # repository-metadata carries the dependency-change verdict. The
+    # !cancelled() guard keeps the scan when that job fails or skips;
+    # the verdict is then empty, which gates.
+    needs:
+      - repository-metadata
+      - sbom
     # yamllint disable-line rule:line-length
     if: ${{ !cancelled() && needs.sbom.result == 'success' && inputs.grype_enabled }}
     runs-on: ubuntu-latest
@@ -1414,7 +1469,10 @@ jobs:
       # transitive dependency awaits a fix. grype_gate_when narrows the
       # gate to changes that touch dependencies, and the remediation
       # window bounds that leniency: a fixed finding gates in any change
-      # once its fix has been available for that many days.
+      # once its fix has been available for that many days. A failed
+      # repository-metadata job can still expose outputs an earlier step
+      # wrote, so the verdict counts only when that job succeeded; an
+      # empty one gates.
       - name: 'Grype audit SBOM'
         id: grype-audit
         # yamllint disable-line rule:line-length
@@ -1428,7 +1486,8 @@ jobs:
           transitive-fail-on: ${{ inputs.grype_transitive_fail_on }}
           only-fixed: ${{ inputs.grype_only_fixed }}
           gate-when: ${{ inputs.grype_gate_when }}
-          dependency-change-manifest: 'dependency-change.json'
+          # yamllint disable-line rule:line-length
+          dependencies-changed: ${{ needs.repository-metadata.result == 'success' && needs.repository-metadata.outputs.dependencies_changed || '' }}
           # yamllint disable-line rule:line-length
           remediation-window-days: ${{ inputs.grype_remediation_window_days }}
           # yamllint disable-line rule:line-length
@@ -1436,6 +1495,7 @@ jobs:
           cache-db: ${{ inputs.grype_cache_db }}
           # yamllint disable-line rule:line-length
           permit-fail: ${{ inputs.grype_permit_fail || vars.NO_BLOCK_AUDIT_FAIL == 'true' }}
+          bypass-repository: ${{ inputs.grype_bypass_repository }}
           github-token: ${{ secrets.GITHUB_TOKEN }}
           artifact-name: grype-scan-results${{ inputs.artefact_suffix }}
 
