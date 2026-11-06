@@ -415,9 +415,9 @@ jobs:
       sbom_enabled: false
       harden_runner_egress: 'block'
       # yamllint disable-line rule:line-length
-      harden_runner_allowlist: 'lfreleng-actions//.github/harden-runner/lf-gerrit-servers/gerrit_servers.txt@6d4a65c5601afd6c2fbe52bda4b0024b132f265d'  # v0.19.0
+      harden_runner_allowlist: 'lfreleng-actions//.github/harden-runner/lf-gerrit-servers/gerrit_servers.txt@6e6cab073a93c0d58e4e8846d44e1cbddbac975b'  # v0.21.0
       # yamllint disable-line rule:line-length
-      harden_runner_supplemental_allowlist: 'lfreleng-actions//.github/harden-runner/lfreleng-actions/allow_list.txt@6d4a65c5601afd6c2fbe52bda4b0024b132f265d'  # v0.19.0
+      harden_runner_supplemental_allowlist: 'lfreleng-actions//.github/harden-runner/lfreleng-actions/allow_list.txt@6e6cab073a93c0d58e4e8846d44e1cbddbac975b'  # v0.21.0
       artefact_suffix: '-supplemental'
 
   # The verify lane in block mode on a baseline that predates the
@@ -457,7 +457,7 @@ jobs:
       sbom_enabled: false
       harden_runner_egress: 'block'
       # yamllint disable-line rule:line-length
-      harden_runner_allowlist: 'lfreleng-actions//.github/harden-runner/lfreleng-actions/allow_list.txt@6d4a65c5601afd6c2fbe52bda4b0024b132f265d'  # v0.19.0
+      harden_runner_allowlist: 'lfreleng-actions//.github/harden-runner/lfreleng-actions/allow_list.txt@6e6cab073a93c0d58e4e8846d44e1cbddbac975b'  # v0.21.0
       harden_runner_extra_endpoints: |
         # Absent from the 2026-07-29 baseline above
         crates.io:443
@@ -500,7 +500,7 @@ jobs:
 
       - name: 'Install uv'
         # yamllint disable-line rule:line-length
-        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9  # v9.0.0
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2  # v10.3.3
 
       - name: 'The validators mirror the scans through the action'
         shell: bash
@@ -570,8 +570,8 @@ jobs:
   # The repository-metadata job decides, once, whether a change
   # touched dependency files, and the Grype job reads its verdict. The
   # live legs see one verdict per event, so assert the wiring each
-  # needs: every lane pins repository-metadata-action v0.4.0, the
-  # first release with detection; the verify lane turns detection on
+  # needs: every lane pins repository-metadata-action v0.5.1 (v0.4.0
+  # first shipped detection); the verify lane turns detection on
   # under grype_gate_when 'dependencies-changed', hands it the Gerrit
   # change and the narrowing inputs, and exposes the verdict; the grype
   # job waits for it, keeps running when it fails, and reads it only
@@ -599,7 +599,7 @@ jobs:
       - name: 'The lanes wire dependency-change detection to Grype'
         shell: bash
         env:
-          PIN: '18e5b7c5b16423b0e734891d103513826b324858'
+          PIN: 'f0e5d2d8dc1154a5d702b75acc551eff6ba072dc'
         run: |
           # The lanes wire dependency-change detection to Grype
           set -euo pipefail
@@ -628,9 +628,9 @@ jobs:
               | select(test(\"^$action@\") and . != \"$action@$PIN\")]
               | length" "$file")"
             if [ "$refs" -ge 1 ] && [ "$stale" -eq 0 ]; then
-              pass "$file pins $action at v0.4.0"
+              pass "$file pins $action at v0.5.1"
             else
-              miss "$file has $refs $action steps, $stale off v0.4.0"
+              miss "$file has $refs $action steps, $stale off v0.5.1"
             fi
             sidecar='dependency-change-(action|manifest)|dependency-change\.json'
             if grep -nE "$sidecar" "$file"; then
