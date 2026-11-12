@@ -32,7 +32,7 @@ jobs:
       packages: read  # fetch internal or private CodeQL packs
       actions: read  # the upload reads run info on private repositories
     # yamllint disable-line rule:line-length
-    uses: lfreleng-actions/security-workflows/.github/workflows/codeql.yaml@378fcc19ebdf37f17fde4888d4b71c83b21d6cf3  # v0.9.7
+    uses: lfreleng-actions/security-workflows/.github/workflows/codeql.yaml@6edd9018efda10b7a429d0bb4658b5aa4bb2cd3f  # v0.10.1
     with:
       languages: 'actions'
       # yamllint disable-line rule:line-length
