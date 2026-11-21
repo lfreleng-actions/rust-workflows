@@ -741,7 +741,7 @@ jobs:
       - name: 'Verify the tag'
         id: 'tag-validate'
         # yamllint disable-line rule:line-length
-        uses: lfreleng-actions/tag-validate-action@e2a80f310fd8f4f43e86e2abc5ffb032e8217a41  # v1.1.11
+        uses: lfreleng-actions/tag-validate-action@0c2ccc8074af58bc62d5eb30d07655e6e6069dd4  # v1.1.12
         with:
           # yamllint disable-line rule:line-length
           tag_location: ${{ inputs.dry_run && format('{0}/{1}', inputs.repository || github.repository, inputs.tag) || '' }}
