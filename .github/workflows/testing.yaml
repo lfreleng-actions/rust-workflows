@@ -570,8 +570,10 @@ jobs:
   # The repository-metadata job decides, once, whether a change
   # touched dependency files, and the Grype job reads its verdict. The
   # live legs see one verdict per event, so assert the wiring each
-  # needs: every lane pins repository-metadata-action v0.5.4 (v0.4.0
-  # first shipped detection); the verify lane turns detection on
+  # needs: every lane calls repository-metadata-action at one shared
+  # commit SHA, with its '# vX.Y.Z' comment, no older than the floor
+  # tests/check-repository-metadata-pin.sh names, so a Dependabot bump
+  # that moves every call together passes; the verify lane turns detection on
   # under grype_gate_when 'dependencies-changed', hands it the Gerrit
   # change and the narrowing inputs, and exposes the verdict; the grype
   # job waits for it, keeps running when it fails, and reads it only
@@ -596,10 +598,25 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: 'The pin check passes and fails as it should'
+        shell: bash
+        run: |
+          # The pin check passes and fails as it should
+          set -euo pipefail
+          bash tests/test-repository-metadata-pin.sh
+
+      - name: 'The lanes share one repository-metadata-action pin'
+        shell: bash
+        run: |
+          # The lanes share one repository-metadata-action pin
+          set -euo pipefail
+          bash tests/check-repository-metadata-pin.sh \
+            .github/workflows/build-test.yaml \
+            .github/workflows/build-test-release.yaml \
+            .github/workflows/merge.yaml
+
       - name: 'The lanes wire dependency-change detection to Grype'
         shell: bash
-        env:
-          PIN: 'ff822d06a64404a54feb79f8e27b687cc76d1c83'
         run: |
           # The lanes wire dependency-change detection to Grype
           set -euo pipefail
@@ -618,20 +635,9 @@ jobs:
               miss "$4: '$got' in $1"
             fi
           }
-          action='lfreleng-actions/repository-metadata-action'
           verify='.github/workflows/build-test.yaml'
           for file in "$verify" .github/workflows/build-test-release.yaml \
             .github/workflows/merge.yaml; do
-            refs="$(yq "[.jobs[].steps[]?.uses // \"\"
-              | select(test(\"^$action@\"))] | length" "$file")"
-            stale="$(yq "[.jobs[].steps[]?.uses // \"\"
-              | select(test(\"^$action@\") and . != \"$action@$PIN\")]
-              | length" "$file")"
-            if [ "$refs" -ge 1 ] && [ "$stale" -eq 0 ]; then
-              pass "$file pins $action at v0.5.4"
-            else
-              miss "$file has $refs $action steps, $stale off v0.5.4"
-            fi
             sidecar='dependency-change-(action|manifest)|dependency-change\.json'
             if grep -nE "$sidecar" "$file"; then
               miss "$file still refers to the SBOM job's sidecar"
