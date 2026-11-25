@@ -11,7 +11,7 @@
 #
 # - gerrit-validate holds one 'Validate Grype inputs' step and the
 #   grype job one 'grype-audit' step, both running grype-scan-action at
-#   the one PIN, each 'uses:' line carrying the '# vX.Y.Z' comment, and
+#   the shared pin, each 'uses:' line carrying the '# vX.Y.Z' comment, and
 #   no other reference to the action in the file;
 # - the scan passes each policy input the lane exposes today as that
 #   grype_* input, verbatim, so dropping a mapping such as the
@@ -41,8 +41,8 @@
 # It first checks the real workflows, then mutates a copy of the verify
 # lane in each way the check must catch and expects each mutant to
 # fail, so a check that silently passes everything fails here too. It
-# also expects positive controls to pass and runs text fixtures through
-# the pin rules, which the parsed mutants cannot carry.
+# also expects positive controls to pass and tests the pin rules on
+# copies of all four workflows, since parsing loses the comments.
 #
 # Usage: bash tests/test-grype-validate-inputs.sh [<workflows-dir>]
 #
@@ -69,22 +69,19 @@ if ! python3 -I -c 'import yaml' 2>/dev/null; then
 fi
 
 # '-I' keeps the working directory off sys.path.
-python3 -I - "${workflows}" <<'PYEOF'
+python3 -I - "${workflows}" "${script_dir}" <<'PYEOF'
 import copy
 import pathlib
 import re
+import subprocess
 import sys
+import tempfile
 
 import yaml
 
 ACTION = "lfreleng-actions/grype-scan-action"
-# v0.6.2: validate-only (v0.6.0), escaped log values (v0.6.1) and a
-# retried Grype install (v0.6.2).
-PIN = "f65dca2762823cfc8f376e32fee9baa6f3292696"
-VERSION = "v0.6.2"
-USES = f"{ACTION}@{PIN}"
-# The pin with its version comment, as each 'uses:' line must hold it.
-PIN_LINE = f"uses: {USES}  # {VERSION}"
+# Retains validate-only, escaped log values, and the Grype install retry.
+FLOOR = "v0.6.2"
 
 LANES = ("build-test.yaml", "build-test-release.yaml", "merge.yaml")
 VERIFY = LANES[0]
@@ -125,17 +122,22 @@ NOT_OWNED = frozenset(
     {"grype_dependency_ecosystems", "grype_dependency_patterns"}
 )
 
-# One grype-scan-action 'uses:' line of the raw text, with any comment.
+# Source lines to count and rewrite after the shared pin check passes.
 USES_LINE = re.compile(
     r"^(?P<lead>[ \t]*(?:-[ \t]+)?)uses:[ \t]*"
     + re.escape(ACTION)
-    + r"@(?P<sha>[^\s'\"#]+)(?:[ \t]+#[^\n]*)?[ \t]*$",
+    + r"@(?P<sha>[0-9a-f]{40})[ \t]+#[ \t]+"
+    + r"(?P<version>v[0-9]+\.[0-9]+\.[0-9]+)[ \t]*$",
     re.MULTILINE,
 )
 
 
 def text(value):
     return "" if value is None else str(value)
+
+
+def action_name(step):
+    return text(step.get("uses")).partition("@")[0]
 
 
 def jobs_of(doc):
@@ -262,8 +264,8 @@ def check_lane(doc, required=frozenset()):
         return problems
     where = f"{VALIDATE_JOB}: '{VALIDATOR}'"
     for step, label in ((validator, where), (scan, f"{SCAN_JOB}: {SCAN_ID}")):
-        if step.get("uses") != USES:
-            problems.append(f"{label} uses {step.get('uses')!r}, not {USES}")
+        if action_name(step) != ACTION:
+            problems.append(f"{label} uses {step.get('uses')!r}, not {ACTION}")
     if "if" in validator:
         problems.append(f"{where} has a condition; it must run on every call")
     lane_inputs = {
@@ -277,9 +279,9 @@ def check_lane(doc, required=frozenset()):
         )
     want = {"validate-only": "true", **mirrored(scan.get("with"))}
     problems.extend(compare_with(validator.get("with") or {}, want, where))
-    uses = [s.get("uses") for s in steps_of(validate_job)
+    uses = [action_name(s) for s in steps_of(validate_job)
             if isinstance(s, dict) and s.get("uses")]
-    if uses != [USES]:
+    if uses != [ACTION]:
         problems.append(
             f"{VALIDATE_JOB} runs actions {uses!r}; the validator must be"
             " its one action: no checkout, no harden-runner"
@@ -304,29 +306,6 @@ def check_lane(doc, required=frozenset()):
     return problems
 
 
-def check_text(content, steps):
-    """Return the problems in the raw text's grype-scan-action lines.
-
-    Each of the steps running the action holds PIN_LINE, and no other
-    reference to the action appears; a value of None accepts any
-    positive count, as long as every reference is the pinned line.
-    """
-    lines = USES_LINE.findall(content)
-    pinned = content.count(PIN_LINE)
-    refs = content.count(f"{ACTION}@")
-    problems = []
-    if steps is not None and len(lines) != steps:
-        problems.append(f"{len(lines)} 'uses: {ACTION}@' lines, not {steps}")
-    elif steps is None and not lines:
-        problems.append(f"no 'uses: {ACTION}@' line")
-    if pinned != refs:
-        problems.append(
-            f"{refs} references to {ACTION} but {pinned} read"
-            f" '{PIN_LINE}'; one pin with its comment governs them all"
-        )
-    return problems
-
-
 def check_check_job(testing, verify):
     """Return the problems in testing.yaml's rejection check.
 
@@ -341,8 +320,8 @@ def check_check_job(testing, verify):
     if not isinstance(job, dict):
         return [f"no {CHECK_JOB} job"]
     actions = [s for s in steps_of(job) if isinstance(s, dict) and s.get("uses")]
-    if len(actions) != 1 or actions[0].get("uses") != USES:
-        return [f"{CHECK_JOB} must run {USES} as its one action"]
+    if len(actions) != 1 or action_name(actions[0]) != ACTION:
+        return [f"{CHECK_JOB} must run {ACTION} as its one action"]
     step = actions[0]
     where = f"{CHECK_JOB}: '{text(step.get('name'))}'"
     problems = []
@@ -398,12 +377,10 @@ def mutants(doc):
                   lambda j, v, s: v["with"].update({"validate-only": True}))
     yield variant("validate-only 'false'",
                   lambda j, v, s: v["with"].update({"validate-only": "false"}))
-    yield variant("validator at another pin",
-                  lambda j, v, s: v.update({"uses": f"{ACTION}@{'0' * 40}"}))
-    yield variant("scan at another pin",
-                  lambda j, v, s: s.update({"uses": f"{ACTION}@{'0' * 40}"}))
-    yield variant("validator at a tag",
-                  lambda j, v, s: v.update({"uses": f"{ACTION}@{VERSION}"}))
+    yield variant("validator runs another action",
+                  lambda j, v, s: v.update({"uses": f"{ACTION}/other"}))
+    yield variant("scan runs another action",
+                  lambda j, v, s: s.update({"uses": "actions/checkout"}))
     added = "${{ inputs.grype_declared_source }}"
     yield variant("scan input the validator lacks",
                   lambda j, v, s: s["with"].update({"declared-source": added}))
@@ -520,73 +497,115 @@ def check_mutants(testing, verify):
                   lambda j, s: s["with"].pop("cache-db"))
     yield variant("an expression in place of a fixed value",
                   lambda j, s: s["with"].update({"fail-on": "${{ x }}"}))
-    yield variant("another pin",
-                  lambda j, s: s.update({"uses": f"{ACTION}@{'0' * 40}"}))
+    yield variant("another action",
+                  lambda j, s: s.update({"uses": "actions/checkout"}))
     yield variant("outcome unread",
                   lambda j, s: s.update({"id": "renamed"}))
 
 
-def repin(content, pins):
-    """Rewrite each grype-scan-action 'uses:' line of content, in order.
-
-    pins holds one (sha, comment) per line; comment None drops it.
-    """
-    pins = iter(pins)
-
-    def line(match):
-        sha, comment = next(pins)
-        tail = "" if comment is None else f"  # {comment}"
-        return f"{match['lead']}uses: {ACTION}@{sha}{tail}"
-
-    return USES_LINE.sub(line, content)
+def check_pins(path, checker):
+    return subprocess.run(
+        ["bash", checker, "--pyyaml", "--action", ACTION, "--floor", FLOOR,
+         *(path / name for name in (*LANES, TESTING))],
+        capture_output=True, text=True, check=False,
+    )
 
 
-# (label, passes, the pin of each of the lane's two lines, extra text)
-PIN_FIXTURES = (
-    ("both lines pinned with the comment", True,
-     ((PIN, VERSION), (PIN, VERSION)), ""),
-    ("the validator with no comment", False,
-     ((PIN, None), (PIN, VERSION)), ""),
-    ("the scan commented as another version", False,
-     ((PIN, VERSION), (PIN, "v0.6.1")), ""),
-    ("the scan at another SHA", False,
-     ((PIN, VERSION), ("f" * 40, VERSION)), ""),
-    ("a third reference at another pin", False,
-     ((PIN, VERSION), (PIN, VERSION)),
-     f"\n      - uses: {ACTION}@{'0' * 40}  # {VERSION}\n"),
-)
-
-
-def main(path):
-    docs = {}
-    for name in (*LANES, TESTING):
-        file = path / name
-        if not file.is_file():
-            print(f"::error::{file} not found")
-            return 1
-        content = file.read_text(encoding="utf-8")
-        docs[name] = (content, yaml.safe_load(content))
-    failed = 0
+def check_wiring(docs):
+    problems = []
     for lane in LANES:
         content, doc = docs[lane]
-        problems = check_lane(doc, REQUIRED[lane]) + check_text(content, 2)
-        for problem in problems:
-            print(f"::error file=.github/workflows/{lane}::{problem}")
-        if problems:
-            failed = 1
-        else:
-            print(f"✅ {lane}: the validator mirrors the scan at {VERSION}")
-    content, testing = docs[TESTING]
-    problems = check_check_job(testing, docs[VERIFY][1])
-    problems += check_text(content, None)
-    for problem in problems:
-        print(f"::error file=.github/workflows/{TESTING}::{problem}")
+        calls = len(USES_LINE.findall(content))
+        if calls != 2:
+            problems.append((lane, f"{calls} 'uses: {ACTION}@' lines, not 2"))
+        problems.extend((lane, p) for p in check_lane(doc, REQUIRED[lane]))
+    problems.extend((TESTING, p) for p in
+                    check_check_job(docs[TESTING][1], docs[VERIFY][1]))
+    return problems
+
+
+def repin(content, pin, count=0):
+    return USES_LINE.sub(lambda m: f"{m['lead']}uses: {ACTION}@{pin}",
+                        content, count=count)
+
+
+def pin_fixtures(sources):
+    """Rewrite the real uses lines, keeping the rest of the workflows."""
+    sha, version = USES_LINE.search(sources[VERIFY]).group("sha", "version")
+    # Synthetic fixture pins, guaranteed to differ from the live pin.
+    new_sha = "1" * 40 if sha == "0" * 40 else "0" * 40
+    newer = f"v{int(version.split('.')[0][1:]) + 1}.0.0"
+    yield "coordinated bump", "", {
+        name: repin(content, f"{new_sha}  # {newer}")
+        for name, content in sources.items()
+    }
+
+    for label, pin, error in (
+        ("one different SHA", f"{new_sha}  # {version}", "as elsewhere"),
+        ("one different version", f"{sha}  # {newer}", "as elsewhere"),
+        ("a tag", f"{version}  # {version}", "is not a plain"),
+        ("a short SHA", f"{sha[:7]}  # {version}", "is not a plain"),
+        ("a missing comment", sha, "is not a plain"),
+        ("an older release", f"{sha}  # v0.0.0", "older than"),
+    ):
+        yield label, error, {
+            **sources, TESTING: repin(sources[TESTING], pin, count=1),
+        }
+
+    # The YAML parser must find this call even though the source line
+    # does not contain the literal action name.
+    escaped = ACTION.replace("-", r"\x2d", 1)
+    yield "an escaped action name", f"calls {ACTION} as '{ACTION}@{sha}'", {
+        **sources,
+        TESTING: USES_LINE.sub(
+            lambda m: f'{m["lead"]}uses: "{escaped}@{sha}"  # {version}',
+            sources[TESTING], count=1,
+        ),
+    }
+
+
+def test_pins(docs, checker):
+    sources = {name: content for name, (content, _) in docs.items()}
+    right = total = 0
+    with tempfile.TemporaryDirectory() as work:
+        path = pathlib.Path(work)
+        for label, error, fixture in pin_fixtures(sources):
+            total += 1
+            for name, content in fixture.items():
+                (path / name).write_text(content, encoding="utf-8")
+            result = check_pins(path, checker)
+            if error:
+                passed = result.returncode == 1 and error in result.stdout
+            else:
+                bumped = {name: (content, yaml.safe_load(content))
+                          for name, content in fixture.items()}
+                passed = result.returncode == 0 and not check_wiring(bumped)
+            if passed:
+                right += 1
+            else:
+                print(f"::error::Pin fixture {label}: wrong result")
+                print(result.stdout + result.stderr, end="")
+    print(f"Pin fixtures as expected: {right}/{total}")
+    return total - right
+
+
+def main(path, checker):
+    result = check_pins(path, checker)
+    print(result.stdout + result.stderr, end="")
+    if result.returncode:
+        return result.returncode
+    docs = {}
+    for name in (*LANES, TESTING):
+        content = (path / name).read_text(encoding="utf-8")
+        docs[name] = (content, yaml.safe_load(content))
+    problems = check_wiring(docs)
+    for name, problem in problems:
+        print(f"::error file=.github/workflows/{name}::{problem}")
     if problems:
-        failed = 1
-    else:
-        print(f"✅ {TESTING}: {CHECK_JOB} runs the validator on a bad value")
-    if failed:
-        return failed
+        return 1
+    for lane in LANES:
+        print(f"✅ {lane}: the validator mirrors the scan")
+    print(f"✅ {TESTING}: {CHECK_JOB} runs the validator on a bad value")
 
     wrong = 0
 
@@ -605,7 +624,8 @@ def main(path):
         verb = "accepted" if expect_pass else "caught"
         print(f"{kind}s {verb}: {right}/{total}")
 
-    verify_text, verify = docs[VERIFY]
+    verify = docs[VERIFY][1]
+    testing = docs[TESTING][1]
 
     def check_verify(d):
         return check_lane(d, REQUIRED[VERIFY])
@@ -614,18 +634,10 @@ def main(path):
     run("Positive control", controls(verify), check_verify, True)
     run("Check-job mutant", check_mutants(testing, verify),
         lambda d: check_check_job(d, verify), False)
-    right = 0
-    for label, expect_pass, pins, extra in PIN_FIXTURES:
-        fixture = repin(verify_text, pins) + extra
-        passed = not check_text(fixture, 2)
-        if passed == expect_pass:
-            right += 1
-        else:
-            print(f"::error::Pin fixture {label}: wrong result")
-    wrong += len(PIN_FIXTURES) - right
-    print(f"Pin fixtures as expected: {right}/{len(PIN_FIXTURES)}")
+    wrong += test_pins(docs, checker)
     return 1 if wrong else 0
 
 
-sys.exit(main(pathlib.Path(sys.argv[1])))
+sys.exit(main(pathlib.Path(sys.argv[1]),
+              pathlib.Path(sys.argv[2]) / "check-repository-metadata-pin.sh"))
 PYEOF
