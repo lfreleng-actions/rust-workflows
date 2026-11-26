@@ -51,6 +51,7 @@ lane() {
 # fixtures; a failure must report <error>.
 run() {
   local rc=0 log
+  # gha-workflow-linter: stderr-merge-ok -- the ::error:: is on stdout; merged so a failing case's log also shows the check's usage, tool and bash errors
   log="$(bash "$check" "$work/a.yaml" "$work/b.yaml" "$work/c.yaml" 2>&1)" \
     || rc=$?
   if { [ "$1" = 'pass' ] && [ "$rc" -eq 0 ]; } \

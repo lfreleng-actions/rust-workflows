@@ -617,6 +617,7 @@ jobs:
 
       - name: 'The lanes wire dependency-change detection to Grype'
         shell: bash
+        # yamllint disable rule:line-length
         run: |
           # The lanes wire dependency-change detection to Grype
           set -euo pipefail
@@ -628,6 +629,7 @@ jobs:
           # expect <file> <yq path> <want> <label>
           expect() {
             local got
+            # gha-workflow-linter: stderr-merge-ok -- test compares yq's result, error text included, with the expected value
             got="$(yq "$2" "$1" 2>&1)" || true
             if [ "$got" = "$3" ]; then
               pass "$4"
@@ -693,6 +695,7 @@ jobs:
             "$(ghexpr "$verdict")" \
             'Grype reads the verdict from a successful job alone'
           exit "$failed"
+        # yamllint enable rule:line-length
 
   # The verify lane checks grype_dependency_ecosystems before any job
   # runs: an input of repository-metadata-action, not of
@@ -723,6 +726,7 @@ jobs:
         shell: bash
         env:
           SCRIPT: ${{ runner.temp }}/grype-inputs.sh
+        # yamllint disable rule:line-length
         run: |
           # Run the cases
           set -euo pipefail
@@ -732,6 +736,7 @@ jobs:
           # check <want: pass|fail> <ecosystems>
           check() {
             local rc=0 log
+            # gha-workflow-linter: stderr-merge-ok -- the ::error:: is on stdout; merged so a failing case's log also shows the script's bash errors
             log="$(env -i PATH="$PATH" ECOSYSTEMS="$2" \
               bash "$SCRIPT" 2>&1)" || rc=$?
             if { [ "$1" = 'pass' ] && [ "$rc" -eq 0 ]; } \
@@ -763,6 +768,7 @@ jobs:
           check fail 'rust go'
           check fail $'rust\ngo'
           exit "$failed"
+        # yamllint enable rule:line-length
 
   # Every harden-runner-block-action step in the five reusable
   # workflows merges the supplemental allow-list and the inline extra
@@ -1355,6 +1361,7 @@ jobs:
           OBJECT: '3333333333333333333333333333333333333333'
           TAG: 'v1.2.0'
           REPOSITORY: 'example/fixture'
+        # yamllint disable rule:line-length
         run: |
           # Run the tag cases
           set -euo pipefail
@@ -1384,6 +1391,7 @@ jobs:
           # and a line its output must carry.
           expect() {
             local rc=0 log
+            # gha-workflow-linter: stderr-merge-ok -- test asserts the exit code and an expected message from either stream
             log="$(CASE="$2" TAG_CONFLICT="$1" PATH="$STUB:$PATH" \
               bash "$SCRIPT" 2>&1)" || rc=$?
             if [ "$rc" -eq "$3" ] && grep -qF -- "$4" <<< "$log"; then
@@ -1417,6 +1425,7 @@ jobs:
           expect review annotated 0 \
             "::warning::$TAG already exists, on the commit under review"
           exit "$failed"
+        # yamllint enable rule:line-length
 
   # The verify lane's commit record and pin scripts, run outside a lane
   # against scratch repositories, as release-check-cases runs the
